@@ -749,6 +749,197 @@ fn tip_event_breakdown_reports_zero_for_a_skipped_self_transfer() {
     assert_eq!(breakdown[1].0, alice);
 }
 
+/// `tip_many` settles every jar in exactly what a single `tip` would do, under
+/// one authorisation and one transaction, and returns one sequence number per
+/// entry in the order the entries were given.
+#[test]
+fn tip_many_pays_every_jar_and_returns_a_seq_per_entry() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &300);
+
+    // Jar one pays alice in full; jar two splits evenly between alice and bob.
+    let jar_one = String::from_str(env, "@one");
+    client.create_jar(
+        &owner,
+        &jar_one,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10_000,
+            },
+        ],
+    );
+    let jar_two = String::from_str(env, "@two");
+    client.create_jar(
+        &owner,
+        &jar_two,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 5_000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 5_000,
+            },
+        ],
+    );
+
+    let seqs = client.tip_many(
+        &tipper,
+        &vec![
+            env,
+            TipRequest {
+                jar_id: jar_one.clone(),
+                amount: 100,
+                message: String::from_str(env, "first"),
+            },
+            TipRequest {
+                jar_id: jar_two.clone(),
+                amount: 200,
+                message: String::from_str(env, "second"),
+            },
+        ],
+    );
+
+    // Read the events before touching the token: the test environment only
+    // exposes the most recent invocation's events, and this batch published
+    // both jars' `tip` events inside a single invocation.
+    let first = last_tip_event(env, &s.contract, &jar_one);
+    let first_breakdown = tip_breakdown(env, &s.contract, &jar_one);
+    let second = last_tip_event(env, &s.contract, &jar_two);
+    let second_breakdown = tip_breakdown(env, &s.contract, &jar_two);
+
+    // One sequence number per entry, allocated in batch order.
+    assert_eq!(seqs.len(), 2);
+    let seq0 = seqs.get(0).unwrap();
+    let seq1 = seqs.get(1).unwrap();
+    assert_eq!(seq1, seq0 + 1, "sequence numbers follow batch order");
+    // Each entry is exactly a single `tip`: its own event, its own breakdown,
+    // its own amount and message. An indexer following single tips needs no
+    // change to follow a batch.
+    assert_eq!(first.amount, 100);
+    assert_eq!(first.message, String::from_str(env, "first"));
+    assert_eq!(first.seq, seq0);
+    assert_eq!(first_breakdown, std::vec![(alice.clone(), 100i128)]);
+    assert_eq!(second.amount, 200);
+    assert_eq!(second.message, String::from_str(env, "second"));
+    assert_eq!(second.seq, seq1);
+    assert_eq!(
+        second_breakdown,
+        std::vec![(alice.clone(), 100i128), (bob.clone(), 100i128)]
+    );
+
+    assert_eq!(token.balance(&alice), 200);
+    assert_eq!(token.balance(&bob), 100);
+    assert_eq!(token.balance(&tipper), 0);
+}
+
+/// A batch is all-or-nothing: when a later entry is rejected, the entries
+/// before it are rolled back too, so no jar is left half-paid and the sender
+/// keeps every stroop.
+#[test]
+fn tip_many_rolls_back_every_entry_when_one_fails() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &100);
+
+    let good = String::from_str(env, "@good");
+    client.create_jar(
+        &owner,
+        &good,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10_000,
+            },
+        ],
+    );
+
+    // The first entry is valid and would pay alice; the second names a jar that
+    // was never created.
+    let missing = String::from_str(env, "@missing");
+    let result = client.try_tip_many(
+        &tipper,
+        &vec![
+            env,
+            TipRequest {
+                jar_id: good.clone(),
+                amount: 100,
+                message: String::from_str(env, "ok"),
+            },
+            TipRequest {
+                jar_id: missing.clone(),
+                amount: 100,
+                message: String::from_str(env, "missing"),
+            },
+        ],
+    );
+
+    assert_eq!(result, Err(Ok(Error::JarNotFound.into())));
+    assert_eq!(
+        token.balance(&alice),
+        0,
+        "the settled first entry is rolled back"
+    );
+    assert_eq!(token.balance(&tipper), 100, "the sender keeps every stroop");
+}
+
+/// Both batch-size guards are typed errors raised before any transfer.
+#[test]
+fn tip_many_rejects_empty_and_oversized_batches() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+
+    let jar_id = String::from_str(env, "@guards");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10_000,
+            },
+        ],
+    );
+
+    assert_eq!(
+        client.try_tip_many(&tipper, &Vec::new(env)),
+        Err(Ok(Error::BatchEmpty.into()))
+    );
+    assert_eq!(
+        client.try_tip_many(&tipper, &batch_of(env, &jar_id, MAX_BATCH_TIPS + 1)),
+        Err(Ok(Error::BatchTooLarge.into()))
+    );
+}
+
 #[test]
 fn create_jar_rejects_bad_bps_sum() {
     let s = setup();
@@ -3335,12 +3526,16 @@ fn get_limits_matches_contract_constants() {
     assert_eq!(limits.bps_denom, BPS_DENOM);
     assert_eq!(limits.max_recipients, MAX_RECIPIENTS);
     assert_eq!(limits.max_message_len, MAX_MESSAGE_LEN);
+    assert_eq!(limits.max_batch_tips, MAX_BATCH_TIPS);
+    assert_eq!(limits.max_jar_id_len, MAX_JAR_SLUG_LEN + 1);
     assert_eq!(
         limits,
         Limits {
             bps_denom: 10_000,
             max_recipients: 20,
             max_message_len: 280,
+            max_batch_tips: 10,
+            max_jar_id_len: 33,
         },
         "the published limits are part of the public interface; changing one \
          means clients and docs/CONTRACT.md have to change with it"
@@ -3390,6 +3585,21 @@ fn get_limits_describes_the_enforced_bounds() {
         .sum();
     assert_eq!(total, limits.bps_denom);
 
+    // max_jar_id_len: the longest canonical id ("@" plus a full-length body)
+    // is accepted, and one byte more is not.
+    let mut exact_bytes = vec_of_bytes(limits.max_jar_id_len - 1);
+    exact_bytes.insert(0, b'@');
+    let exact_id = String::from_bytes(env, &exact_bytes);
+    client.create_jar(&owner, &exact_id, &splits);
+
+    let mut over_bytes = vec_of_bytes(limits.max_jar_id_len);
+    over_bytes.insert(0, b'@');
+    let over_id = String::from_bytes(env, &over_bytes);
+    assert_eq!(
+        client.try_create_jar(&owner, &over_id, &splits),
+        Err(Ok(Error::InvalidJarId.into()))
+    );
+
     // max_message_len: a message of exactly that many bytes is accepted, and
     // one byte more is not.
     let exact = String::from_bytes(env, &vec_of_bytes(limits.max_message_len));
@@ -3400,6 +3610,50 @@ fn get_limits_describes_the_enforced_bounds() {
         client.try_tip(&tipper, &jar_id, &1, &over),
         Err(Ok(Error::MessageTooLong.into()))
     );
+
+    // max_batch_tips: a batch of exactly that many entries is accepted, and one
+    // more is not. The batch needs its own jar: one recipient on the whole
+    // 10 000 bps, so a 1-stroop tip is above the truncation floor.
+    let batch_jar = String::from_str(env, "@batch");
+    client.create_jar(
+        &owner,
+        &batch_jar,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: limits.bps_denom,
+            },
+        ],
+    );
+    let batch_count = limits.max_batch_tips + 1;
+    token_admin.mint(&tipper, &(batch_count as i128));
+
+    let exact_batch = batch_of(env, &batch_jar, limits.max_batch_tips);
+    assert_eq!(
+        client.tip_many(&tipper, &exact_batch).len(),
+        limits.max_batch_tips
+    );
+
+    let over_batch = batch_of(env, &batch_jar, batch_count);
+    assert_eq!(
+        client.try_tip_many(&tipper, &over_batch),
+        Err(Ok(Error::BatchTooLarge.into()))
+    );
+}
+
+/// A `tip_many` batch of `n` entries all naming `jar_id`, each for one stroop
+/// with a one-byte message.
+fn batch_of(env: &Env, jar_id: &String, n: u32) -> Vec<TipRequest> {
+    let mut tips = Vec::new(env);
+    for _ in 0..n {
+        tips.push_back(TipRequest {
+            jar_id: jar_id.clone(),
+            amount: 1,
+            message: String::from_str(env, "t"),
+        });
+    }
+    tips
 }
 
 /// `n` filler ASCII bytes — one UTF-8 byte each, so the byte length is `n`.
@@ -4920,7 +5174,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        3,
+        4,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"

@@ -18,6 +18,26 @@
   {
     "udt_struct_v0": {
       "lib": "",
+      "name": "TipRequest",
+      "fields": [
+        {
+          "name": "amount",
+          "type_": "i128"
+        },
+        {
+          "name": "jar_id",
+          "type_": "string"
+        },
+        {
+          "name": "message",
+          "type_": "string"
+        }
+      ]
+    }
+  },
+  {
+    "udt_struct_v0": {
+      "lib": "",
       "name": "CompactSplit",
       "fields": [
         {
@@ -134,6 +154,11 @@
       "fields": [
         {
           "name": "bps_denom",
+          "type_": "u32"
+        },
+        {
+          "name": "max_batch_tips",
+          "name": "max_jar_id_len",
           "type_": "u32"
         },
         {
@@ -327,6 +352,14 @@
         {
           "name": "InvalidMessage",
           "value": 36
+        },
+        {
+          "name": "BatchEmpty",
+          "value": 37
+        },
+        {
+          "name": "BatchTooLarge",
+          "value": 38
         }
       ]
     }
@@ -797,6 +830,36 @@
       ],
       "outputs": [
         "u64"
+      ]
+    }
+  },
+  {
+    "function_v0": {
+      "name": "tip_many",
+      "inputs": [
+        {
+          "name": "from",
+          "type_": "address"
+        },
+        {
+          "name": "tips",
+          "type_": {
+            "vec": {
+              "element_type": {
+                "udt": {
+                  "name": "TipRequest"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "vec": {
+            "element_type": "u64"
+          }
+        }
       ]
     }
   },
