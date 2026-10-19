@@ -410,6 +410,73 @@ the code, so flipping that profile setting cannot turn it into a bypass.
 > must therefore be able to hold the jar token (a trustline / authorized account
 > on the asset), and a held share is only ever claimable by the recipient it is
 > credited to. The tipper is debited the full amount either way.
+
+### When the tipper is also a recipient (85)
+
+If the address sending a tip appears in the jar's splits, `tip` does not move
+their share. The split is computed as for any other recipient, and then the
+tipper's entry is skipped: no transfer to themselves, and none to the contract.
+Every other recipient is paid exactly as usual. The one zero-share case a plan
+can hold is therefore the tipper — a share that would truncate to zero is
+rejected before any transfer with `SplitAmountTooSmall`
+([the minimum tip](#the-minimum-tip-and-the-decision-recorded-here)), so a `0` in
+the plan can only mean "this recipient is the sender".
+
+**What the tipper actually pays.** The tipper is debited the other recipients'
+shares plus the protocol fee, not the `amount` they passed in. In a jar that
+pays the tipper a share `s`, the amount leaving their balance is `amount - s`.
+This is the only configuration in which the amount that leaves the tipper
+differs from `amount`, and it is why the `tip` event reports the tipper's
+`breakdown` entry as `0`: the event is a record of the transfers the call made,
+and the call made no transfer for them.
+
+**Worked example.** A jar split 50/50 between the supporter and `alice`, with the
+supporter listed first:
+
+```rust
+splits = [{ to: supporter, bps: 5_000 }, { to: alice, bps: 5_000 }]
+```
+
+The supporter tips `100`, with no protocol fee configured. The split runs over
+the whole amount — the supporter would receive `100 * 5_000 / 10_000 = 50`, and
+`alice`, the final entry, receives the remainder `50` — and then the supporter's
+entry is skipped:
+
+| Account | Before | After | Change |
+|---------|-------:|------:|--------|
+| supporter (the tipper) | 100 | 50 | −50 — only `alice`'s share leaves them; their own 50 stays |
+| alice | 0 | 50 | +50 |
+| admin | 0 | 0 | — the fee is `0` |
+
+The `tip` event's `breakdown` is `[(supporter, 0), (alice, 50)]`, and the
+identity holds: `fee (0) + moved (50) + the tipper's own share (50) = amount
+(100)`. The supporter's balance confirms it — they were debited `50`, not `100`.
+
+**With a protocol fee** the rule applies to what is left after the fee comes off
+the top. At 100 bps (1%), a tip of `100` moves `1` to the admin and splits the
+remaining `99`: the supporter's `49` stays with them, and `alice` receives `50`.
+The supporter is debited `51` (`amount - 49`), and
+`fee (1) + moved (50) + own share (49) = 100`.
+
+**Being the tipper decides the skip, not the position.** Where the entry sits in
+the list does not change the rule, and the other recipients are paid by the same
+arithmetic either way. Position does decide which entry absorbs the rounding
+dust, because the split gives the remainder to the **last** entry: if the tipper
+is last, the dust-inclusive remainder is the share they keep and the others
+receive their truncated shares; if the tipper is elsewhere, the last *other*
+recipient absorbs that dust instead. The difference is bounded by the dust — at
+most `n - 1` stroops — and is a property of the split arithmetic, not of the
+self-tip rule.
+
+**A tipper who is the jar's only recipient moves nothing**, and the call is
+rejected with `NoFundsMoved` (30) rather than publishing a `tip` event that
+claims a tip happened at no cost.
+
+To see these amounts before signing, use
+[`preview_tip(jar_id, from, amount)`](#previewing-a-tip-for-a-known-sender): it
+reports the tipper as `0` and every other recipient's actual payout, computed by
+the same helper `tip` pays with.
+
 ## Authorization
 
 Every function that names an address in its signature requires that address's
@@ -449,7 +516,10 @@ Consequences a client has to design for:
 - A tipper who is also a recipient is not paid, so no transfer appears for them
   in the tree, and their share stays with them. With a
   [protocol fee](#the-protocol-fee-79) set, the tree also holds one transfer of
-  the fee to the admin. See [`breakdown`](#tip--published-on-every-successful-tip).
+  the fee to the admin. See
+  [when the tipper is also a recipient](#when-the-tipper-is-also-a-recipient-85)
+  for what the tipper is actually charged, and
+  [`breakdown`](#tip--published-on-every-successful-tip).
 
 ### Owner-only functions
 
