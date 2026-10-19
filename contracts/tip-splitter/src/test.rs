@@ -3231,12 +3231,14 @@ fn get_limits_matches_contract_constants() {
     assert_eq!(limits.bps_denom, BPS_DENOM);
     assert_eq!(limits.max_recipients, MAX_RECIPIENTS);
     assert_eq!(limits.max_message_len, MAX_MESSAGE_LEN);
+    assert_eq!(limits.max_jar_id_len, MAX_JAR_ID_LEN);
     assert_eq!(
         limits,
         Limits {
             bps_denom: 10_000,
             max_recipients: 20,
             max_message_len: 280,
+            max_jar_id_len: 64,
         },
         "the published limits are part of the public interface; changing one \
          means clients and docs/CONTRACT.md have to change with it"
@@ -3285,6 +3287,21 @@ fn get_limits_describes_the_enforced_bounds() {
         .map(|i| stored.splits.get(i).unwrap().bps)
         .sum();
     assert_eq!(total, limits.bps_denom);
+
+    // max_jar_id_len: an id of exactly that many bytes is accepted, and one
+    // byte more is not.
+    let mut exact_bytes = vec_of_bytes(limits.max_jar_id_len - 1);
+    exact_bytes.insert(0, b'@');
+    let exact_id = String::from_bytes(env, &exact_bytes);
+    client.create_jar(&owner, &exact_id, &splits);
+
+    let mut over_bytes = vec_of_bytes(limits.max_jar_id_len);
+    over_bytes.insert(0, b'@');
+    let over_id = String::from_bytes(env, &over_bytes);
+    assert_eq!(
+        client.try_create_jar(&owner, &over_id, &splits),
+        Err(Ok(Error::InvalidJarId.into()))
+    );
 
     // max_message_len: a message of exactly that many bytes is accepted, and
     // one byte more is not.

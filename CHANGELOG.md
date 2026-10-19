@@ -19,6 +19,7 @@ All notable changes to `novatip-contracts` are documented here.
 - `min_tip` event and `BelowMinTipAmount` error (code 13)
 - `scripts/transfer-jar.sh`, `scripts/set-min-tip.sh`, `scripts/update-splits.sh`
 - Error codes 14 `TokenNotAllowed`, 15 `CannotDisallowDefault`, 16 `StatsOverflow`
+- `get_limits() -> Limits` reports `max_jar_id_len`, populated from `MAX_JAR_ID_LEN`, so onboarding can validate a slug against the contract's real bound instead of hardcoding 64 (#98). The returned map gains a field; a client decoding `Limits` into a fixed three-field type must add it
 
 ### Changed (breaking: event payload)
 - The `tip` event (`TipEvent`) gained a `fee: i128` field: the protocol fee the tip moved to the admin (#79). `version()` is now `3`
