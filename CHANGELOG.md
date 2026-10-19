@@ -20,6 +20,9 @@ All notable changes to `novatip-contracts` are documented here.
 - `scripts/transfer-jar.sh`, `scripts/set-min-tip.sh`, `scripts/update-splits.sh`
 - Error codes 14 `TokenNotAllowed`, 15 `CannotDisallowDefault`, 16 `StatsOverflow`
 
+### Changed (breaking: jar ids)
+- `create_jar` and `rename_jar` accept only canonical slugs — `@` followed by 3–32 characters from `[a-z0-9_-]`, matching the backend's `SLUG_REGEX` (#95). Upper case, whitespace, control bytes and lookalikes are rejected with `InvalidJarId`; `jar_exists` returns `false` for them.
+
 ### Changed (breaking: event payload)
 - The `tip` event (`TipEvent`) gained a `fee: i128` field: the protocol fee the tip moved to the admin (#79). `version()` is now `3`
 - `collect_recurring` publishes the same `TipEvent` struct as `tip`; it was still publishing the old positional tuple

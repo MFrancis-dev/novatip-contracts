@@ -33,6 +33,13 @@ const MAX_RECIPIENTS: u32 = 20;
 /// an unbounded id costs unnecessary rent and can produce jars no frontend can
 /// address.
 const MAX_JAR_ID_LEN: u32 = 64;
+/// Shortest slug body, excluding the leading `@`. Mirrors `novatip-backend`'s
+/// `SLUG_REGEX`, so every id a tip page can produce is accepted here.
+const MIN_JAR_SLUG_LEN: u32 = 3;
+/// Longest slug body, excluding the leading `@`. Mirrors the backend as well;
+/// the backend never emits a longer slug, and a jar it cannot link to is dead
+/// weight.
+const MAX_JAR_SLUG_LEN: u32 = 32;
 /// Longest tip message, in UTF-8 bytes, that may ride along in the `tip` event.
 ///
 /// The message is echoed verbatim into the event payload, so an unbounded
@@ -335,7 +342,8 @@ pub enum Error {
     DuplicateRecipient = 7,
     /// The tip message exceeds the byte-length limit.
     MessageTooLong = 8,
-    /// The jar id is empty or exceeds the byte-length limit.
+    /// The jar id is not a canonical `@`-prefixed slug: empty, longer than
+    /// the limit, or containing bytes outside `[a-z0-9_-]`.
     InvalidJarId = 9,
     /// Splits list is empty.
     SplitsEmpty = 10,
@@ -553,9 +561,43 @@ impl TipSplitter {
             .publish((symbol_short!("tk_dis"), token), admin);
     }
 
-    /// Register a new tip jar. `owner` must authorize. `jar_id` must be
-    /// non-empty and at most `MAX_JAR_ID_LEN` bytes. Splits must sum to 100%
-    /// and may not name the same recipient twice.
+    /// Whether `jar_id` is a canonical slug: a leading `@` followed by
+    /// 3–32 lower-case ASCII letters, digits, `_` or `-`.
+    ///
+    /// The contract is the only place that can enforce one shape for every
+    /// client. Without it, `@alice`, `@Alice` and `@alice ` are three distinct
+    /// jars, and the lookalikes are indistinguishable wherever a raw id is
+    /// rendered. The backend's `SLUG_REGEX` is the same rule, so rejecting
+    /// anything else cannot lock out a jar a tip page could create.
+    ///
+    /// Copies at most 33 bytes into a stack buffer; no allocation, so it is
+    /// cheap enough to run before the storage lookup.
+    fn is_valid_jar_id(jar_id: &String) -> bool {
+        let len = jar_id.len();
+        if len > MAX_JAR_ID_LEN || !(MIN_JAR_SLUG_LEN + 1..=MAX_JAR_SLUG_LEN + 1).contains(&len) {
+            return false;
+        }
+        let mut buf = [0u8; (MAX_JAR_SLUG_LEN + 1) as usize];
+        jar_id.copy_into_slice(&mut buf[..len as usize]);
+        if buf[0] != b'@' {
+            return false;
+        }
+        for byte in &buf[1..len as usize] {
+            if !(byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || *byte == b'_'
+                || *byte == b'-')
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Register a new tip jar. `owner` must authorize. `jar_id` must be a
+    /// canonical slug — a leading `@` followed by 3–32 lower-case ASCII
+    /// letters, digits, `_` or `-` — and at most `MAX_JAR_ID_LEN` bytes.
+    /// Splits must sum to 100% and may not name the same recipient twice.
     ///
     /// When the admin has named a registrar (#178), creating a jar
     /// additionally requires that contract to co-sign the exact
@@ -566,7 +608,7 @@ impl TipSplitter {
     /// event log without any on-chain list.
     pub fn create_jar(env: Env, owner: Address, jar_id: String, splits: Vec<Split>) {
         owner.require_auth();
-        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN {
+        if !Self::is_valid_jar_id(&jar_id) {
             panic_with_error!(&env, Error::InvalidJarId);
         }
         // Issue #94: reject the contract itself or its token as jar owner.
@@ -966,7 +1008,7 @@ impl TipSplitter {
     /// The old id stops resolving immediately, and the new id must not already be in use.
     /// Emits a `jar_rnm` event carrying both ids for indexer tracking.
     pub fn rename_jar(env: Env, jar_id: String, new_jar_id: String) {
-        if new_jar_id.is_empty() || new_jar_id.len() > MAX_JAR_ID_LEN {
+        if !Self::is_valid_jar_id(&new_jar_id) {
             panic_with_error!(&env, Error::InvalidJarId);
         }
         let old_key = DataKey::Jar(jar_id.clone());
@@ -2393,7 +2435,7 @@ impl TipSplitter {
     /// returns a plain `bool` and reads one storage key, so the onboarding form
     /// can run it on every (debounced) keystroke.
     pub fn jar_exists(env: Env, jar_id: String) -> bool {
-        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN {
+        if !Self::is_valid_jar_id(&jar_id) {
             return false;
         }
         env.storage().persistent().has(&DataKey::Jar(jar_id))
