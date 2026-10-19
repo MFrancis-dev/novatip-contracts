@@ -20,6 +20,7 @@ All notable changes to `novatip-contracts` are documented here.
 - `min_tip` event and `BelowMinTipAmount` error (code 13)
 - `scripts/transfer-jar.sh`, `scripts/set-min-tip.sh`, `scripts/update-splits.sh`
 - Error codes 14 `TokenNotAllowed`, 15 `CannotDisallowDefault`, 16 `StatsOverflow`
+- `get_limits() -> Limits` reports `max_jar_id_len`, the longest accepted jar id (`MAX_JAR_SLUG_LEN + 1`, i.e. `@` plus a 32-character body), so onboarding can validate a slug against the contract's real bound instead of hardcoding 64 (#98). The returned map gains a field; a client decoding `Limits` into a fixed three-field type must add it. With the canonical charset from #95 the effective maximum is 33 bytes, not the 64-byte `MAX_JAR_ID_LEN` storage cap
 
 ### Changed (breaking: jar ids)
 - `create_jar` and `rename_jar` accept only canonical slugs — `@` followed by 3–32 characters from `[a-z0-9_-]`, matching the backend's `SLUG_REGEX` (#95). Upper case, whitespace, control bytes and lookalikes are rejected with `InvalidJarId`; `jar_exists` returns `false` for them.

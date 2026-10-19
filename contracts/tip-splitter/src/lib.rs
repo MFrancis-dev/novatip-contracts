@@ -267,6 +267,12 @@ pub struct Limits {
     pub max_message_len: u32,
     /// Most jars one `tip_many` call may tip.
     pub max_batch_tips: u32,
+    /// Longest accepted jar id, in UTF-8 bytes: the leading `@` plus the
+    /// 3–32-character canonical body. `create_jar` and `rename_jar` reject a
+    /// longer id with `InvalidJarId`. This is the effective input bound; the
+    /// looser 64-byte storage cap (`MAX_JAR_ID_LEN`) is unreachable while the
+    /// canonical rule holds.
+    pub max_jar_id_len: u32,
 }
 
 /// A supporter's standing intention to tip a jar on a schedule.
@@ -2597,7 +2603,8 @@ impl TipSplitter {
     }
 
     /// The bounds this contract enforces: the basis-point denominator, the
-    /// maximum recipient count, and the maximum tip-message length in bytes.
+    /// maximum recipient count, the maximum tip-message length in bytes, and
+    /// the maximum accepted jar-id length in bytes.
     ///
     /// These are compile-time constants, so the view reads no storage. It
     /// exists so a client can discover the limits of the contract it is
@@ -2609,6 +2616,7 @@ impl TipSplitter {
             max_recipients: MAX_RECIPIENTS,
             max_message_len: MAX_MESSAGE_LEN,
             max_batch_tips: MAX_BATCH_TIPS,
+            max_jar_id_len: MAX_JAR_SLUG_LEN + 1,
         }
     }
 
