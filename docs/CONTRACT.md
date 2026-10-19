@@ -36,17 +36,23 @@ withdrawal.
 ```rust
 struct Split    { to: Address, bps: u32 }
 struct Jar      { owner: Address, splits: Vec<Split>, locked: bool }
-struct Limits   { bps_denom: u32, max_recipients: u32, max_message_len: u32 }
+struct Limits   { bps_denom: u32, max_recipients: u32, max_message_len: u32, max_batch_tips: u32 }
 struct Recurring {
     supporter: Address, jar_id: String, amount: i128,
     period_ledgers: u32, message: String, next_due_ledger: u32,
 }
 struct Split          { to: Address, bps: u32 }
 struct Jar            { owner: Address, splits: Vec<Split> }
-struct Limits         { bps_denom: u32, max_recipients: u32, max_message_len: u32 }
+struct Limits         { bps_denom: u32, max_recipients: u32, max_message_len: u32, max_batch_tips: u32 }
+struct TipRequest     { jar_id: String, amount: i128, message: String }
 struct JarStats       { tip_count: u64, total: i128 }
 struct SupporterStats { tip_count: u64, total: i128 }
 ```
+
+`TipRequest` is one entry of a [`tip_many`](#tipping-many-jars-at-once-84) batch: the
+slug to tip, the amount, and the message that rides along with that jar's `tip`
+event. It is exactly the per-jar argument list of `tip`, so a batched entry
+carries no new fields to reason about.
 
 `JarStats` and `SupporterStats` are the on-chain totals behind
 [reading tip totals](#reading-tip-totals). They share a shape but not a key:
@@ -85,6 +91,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_fee_bps() -> u32` | — | The protocol fee currently taken from every tip, in basis points. `0` until the admin sets one. |
 | `tip(from, jar_id, amount, message) -> u64` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown and this tip's sequence number, and returns that number. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `tip_with_ref(from, jar_id, amount, message, reference) -> u64` | `from` | Identical to `tip`, plus an optional 32-byte opaque `reference` echoed in the `tip` event. Same transfers, same validation, same counter — both entry points call one internal implementation. |
+| `tip_many(from, tips) -> Vec<u64>` | `from` | Tip several jars in one transaction, each with its own amount and message. `from` authorises once for the whole batch, and every entry settles exactly as a single `tip` would — same validation, same minimum-tip check, same protocol fee, same self-transfer skip — and publishes its own `tip` event. The batch is bounded by `MAX_BATCH_TIPS` (`BatchTooLarge`); an empty batch is `BatchEmpty`. **All-or-nothing**: a failure in any jar reverts the whole call, leaving the earlier jars untouched. Returns one sequence number per entry, in order. See [tipping many jars at once](#tipping-many-jars-at-once-84). |
 | `get_tip_count() -> u64` | — | How many tips the contract has taken, i.e. the number the next tip will receive. `0` on a fresh deploy. |
 | `get_jar(jar_id) -> Jar` | — | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
@@ -103,6 +110,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `resume()` | contract `admin` | Lift a pause. Emits a `resume` event. |
 | `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
 | `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the new hash. |
+| `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
 | `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_jar_id_len`. Reads no storage. |
 | `version() -> u32` | — | Which interface shape this deployment speaks. Reads no storage. See [detecting the interface version](#detecting-the-interface-version). |
 | `get_jar_stats(jar_id) -> JarStats` | — | A jar's on-chain tip count and total. Zeros for a jar nobody has tipped; `JarNotFound` if the slug is free. |
@@ -127,12 +135,14 @@ written as raised only when every earlier check has passed.
 | `get_split_count(jar_id) -> u32` | — | `JarNotFound` | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
 | `preview_split(jar_id, amount) -> Vec<i128>` | — | `AmountZero` / `AmountNegative` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | What each recipient would receive from a tip of `amount`, in split order. Rejects amounts below the jar's minimum with `BelowMinTipAmount` as well as the amounts `tip` rejects, in the same order; panics with `JarNotFound` if the slug is free. |
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `InvalidAmount` (amount ≤ 0) → `JarNotFound` → `BelowMinTipAmount` → `InvalidAmount` (a share truncates to zero, or `amount * bps` overflows) | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
+| `tip_many(from, tips) -> Vec<u64>` | `from` | Soroban auth error (missing `from` signature) → `ContractPaused` → `BatchEmpty` → `BatchTooLarge` → `NotInitialized`, then per entry the same sequence as `tip`: `AmountZero` / `AmountNegative` → `MessageTooLong` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` → `InsufficientBalance` → the token contract's own error | Tip several jars in one transaction (#84). The batch-size and pause checks run first, before any jar is looked up; each entry is then settled exactly as `tip` would settle it, and a failure in any entry reverts the whole call. |
 | `collect_recurring(id)` | — | `RecurringNotFound` → `NotDue` → `JarNotFound` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
 | `jar_exists(jar_id) -> bool` | — | — | Whether the slug is already registered. Reads one key and returns a plain `bool`; never panics on a free slug. |
 | `is_recipient(jar_id, address) -> bool` | — | `JarNotFound` | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
 | `get_min_tip_amount(jar_id) -> Option<i128>` | — | `JarNotFound` | Read a jar's optional minimum tip amount. Returns `None` if no minimum is set. Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | `NotInitialized` | The USDC token address tips settle in. Reads instance storage; `NotInitialized` if the deploy-time token is absent. |
 | `get_admin() -> Address` | — | `NotInitialized` | The contract admin recorded at deploy time. Reads instance storage; `NotInitialized` if the deploy-time admin is absent. |
+| `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_batch_tips`. Reads no storage. |
 | `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_jar_id_len`. Reads no storage. |
 
 Two ordering notes that are easy to get wrong:
@@ -182,6 +192,12 @@ what a *future* tip would pay each of them, use
 
 ### Reading the contract's limits
 
+`BPS_DENOM`, `MAX_RECIPIENTS`, `MAX_MESSAGE_LEN` and `MAX_BATCH_TIPS` are
+private constants, so a client that wants to validate input before paying for a
+transaction has no way to read them. The result was that every client carried
+its own copy — the tip form capped messages at its own number, the splits editor
+hardcoded the twenty recipient limit — and changing a bound here silently
+desynchronised the stack.
 `BPS_DENOM`, `MAX_RECIPIENTS`, `MAX_MESSAGE_LEN`, `MAX_JAR_SLUG_LEN` and
 `MAX_JAR_ID_LEN` are private constants, so a client that wants to validate
 input before paying for a transaction has no way to read them. The result was
@@ -197,6 +213,7 @@ Limits {
     bps_denom: 10_000,       // BPS_DENOM — the denominator every `bps` is a share of
     max_recipients: 20,      // MAX_RECIPIENTS — most recipients in one jar
     max_message_len: 280,    // MAX_MESSAGE_LEN — longest tip message, in UTF-8 bytes
+    max_batch_tips: 10,      // MAX_BATCH_TIPS — most jars one `tip_many` call may tip
     max_jar_id_len: 33,      // MAX_JAR_SLUG_LEN + 1 — longest canonical jar id ("@" + 32)
 }
 ```
@@ -232,6 +249,49 @@ built wasm, and fails when the Functions table above or the Errors table
 below no longer matches the contract — a function or error variant missing
 from either table, listed there although the contract does not have it, or
 documented with a different error number.
+
+### Tipping many jars at once (84)
+
+A tipper who supports several creators pays for it per creator: one transaction,
+one wallet approval and one network fee each. For micro-tips, where the point is
+speed and the amounts are small, that overhead is a large fraction of the whole
+interaction.
+
+`tip_many(from, tips)` settles a whole batch under **one** authorisation. Each
+entry in `tips` is a `TipRequest` — the slug, the amount, and the message — and
+each is settled exactly as a standalone [`tip`](#tip--published-on-every-successful-tip)
+would settle it:
+
+```rust
+TipRequest { jar_id: String, amount: i128, message: String }
+```
+
+"Exactly" is literal. Every entry goes through the same private `settle_tip` the
+single-jar entry points share, so a batched jar gets the same validation, the
+same minimum-tip check, the same protocol fee, the same self-transfer skip, the
+same held-funds fallback, and **its own `tip` event** carrying its own sequence
+number. Each entry's amount and message are its own; the single authorisation is
+the only thing the entries share.
+
+So a batched tip is indistinguishable, on chain, from the same tips sent one at
+a time — an indexer that already decodes a `tip` event needs no change
+whatsoever to follow a batch. `tip_many` returns one sequence number per entry,
+in the order the entries were given.
+
+**The batch is all-or-nothing.** Soroban rolls the whole transaction back if any
+entry panics, so a batch whose last jar is rejected leaves the earlier jars'
+balances and totals untouched, and no sequence number is consumed by the entries
+that would have settled. A client that wants partial success tips the jars that
+would fail separately, or filters them out first.
+
+The batch is bounded by `MAX_BATCH_TIPS` (see
+[reading the contract's limits](#reading-the-contracts-limits)) and that bound is
+a typed error, not a budget abort: each entry can fan out to `MAX_RECIPIENTS`
+transfers, so an unbounded batch would eventually exhaust the transaction's
+budget and fail with an opaque wasm trap. `MAX_BATCH_TIPS * MAX_RECIPIENTS`
+keeps the worst case at 200 transfers, the same order of magnitude as a single
+maximum-size jar. Exceeding the bound is `BatchTooLarge`; an empty batch is
+`BatchEmpty`.
 
 ### Reading just the owner
 
@@ -557,6 +617,8 @@ slug names at submission time.
 | 34 | `JarIdInUse` | `rename_jar` was given a jar id that is already in use. |
 | 35 | `FeeTooHigh` | `set_fee_bps` was given a fee above `500` bps (5%). The stored fee is unchanged. |
 | 36 | `InvalidMessage` | The tip message is not valid UTF-8, or contains a control character other than newline. Raised before any transfer, and by `create_recurring` for the message it stores. |
+| 37 | `BatchEmpty` | `tip_many` was given a batch with no entries. Raised before any jar is looked up, so an empty batch never moves funds. |
+| 38 | `BatchTooLarge` | `tip_many` was given more entries than `MAX_BATCH_TIPS` (10). Raised before any jar is looked up. |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**

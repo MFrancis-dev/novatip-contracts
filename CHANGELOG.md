@@ -5,6 +5,7 @@ All notable changes to `novatip-contracts` are documented here.
 ## [Unreleased]
 
 ### Added
+- `tip_many(from, tips) -> Vec<u64>` tips several jars in one transaction from a single authorisation, each entry carrying its own amount and message and publishing its own `tip` event (#84). Bounded by `MAX_BATCH_TIPS` (10); the whole call is all-or-nothing. New `TipRequest { jar_id, amount, message }` type, new errors `BatchEmpty` (37) and `BatchTooLarge` (38), and `get_limits().max_batch_tips`
 - Protocol fee (#79): `set_fee_bps(fee_bps)` (admin only, default `0`, capped at 500 bps / 5%) and `get_fee_bps() -> u32`. The fee is taken from each tip before the split and paid to the admin; recipients' total plus the fee equals the tip exactly. New `fee_set` event, new error `FeeTooHigh` (35), and `scripts/set-fee.sh` (defaults to the intended 100 bps)
 - Tests for authority moving with jar ownership (#75), multi-byte messages at the 280-byte limit (#74), and a tipper who holds a share in the distribution property test (#78)
 - `version() -> u32` returns `INTERFACE_VERSION`, a compile-time constant bumped whenever the public interface changes shape (#169)
@@ -25,6 +26,7 @@ All notable changes to `novatip-contracts` are documented here.
 - `create_jar` and `rename_jar` accept only canonical slugs — `@` followed by 3–32 characters from `[a-z0-9_-]`, matching the backend's `SLUG_REGEX` (#95). Upper case, whitespace, control bytes and lookalikes are rejected with `InvalidJarId`; `jar_exists` returns `false` for them.
 
 ### Changed (breaking: event payload)
+- `version()` is now `4`: the `tip_many` entry point, the `TipRequest` type and the `BatchEmpty` (37) / `BatchTooLarge` (38) errors were added to the public interface (#84). No existing function, error number or event shape changed
 - The `tip` event (`TipEvent`) gained a `fee: i128` field: the protocol fee the tip moved to the admin (#79). `version()` is now `3`
 - `collect_recurring` publishes the same `TipEvent` struct as `tip`; it was still publishing the old positional tuple
 - A tipper who is also a recipient now keeps their own share; it used to roll into the last recipient, so they paid it out to someone else (#78). `preview_tip` reports the new amounts

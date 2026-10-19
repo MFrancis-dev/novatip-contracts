@@ -27,6 +27,15 @@ use soroban_sdk::{
 const BPS_DENOM: u32 = 10_000;
 /// Safety bound so a single tip can't fan out to an unbounded recipient list.
 const MAX_RECIPIENTS: u32 = 20;
+/// Most jars one `tip_many` call may tip.
+///
+/// Each entry pays up to `MAX_RECIPIENTS` recipients, so the batch fan-out is
+/// `MAX_BATCH_TIPS * MAX_RECIPIENTS` token transfers plus one `tip` event per
+/// jar, all inside one transaction's budget. 10 keeps the worst case at 200
+/// transfers, in the same order of magnitude as a single maximum-size jar; a
+/// larger batch would abort on budget rather than on a typed error, which is
+/// exactly the failure this bound exists to convert into a named one.
+const MAX_BATCH_TIPS: u32 = 10;
 /// Longest `jar_id`, in bytes, accepted by `create_jar`.
 ///
 /// The id is used as a storage key, an event topic, and a public URL slug, so
@@ -135,7 +144,7 @@ const INSTANCE_TTL_THRESHOLD: u32 = JAR_TTL_THRESHOLD;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 3;
+const INTERFACE_VERSION: u32 = 4;
 
 /// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
@@ -145,6 +154,24 @@ pub struct Split {
     pub to: Address,
     /// Share of each tip in basis points, out of 10 000; a jar's splits sum to exactly 10 000.
     pub bps: u32,
+}
+
+/// One jar to tip inside a [`TipSplitter::tip_many`] batch: the slug, the
+/// amount, and the message that rides along with that jar's `tip` event.
+///
+/// Fields are named rather than positional so the batch decodes
+/// forward-compatibly, the same reason the event payloads name theirs. A
+/// `TipRequest` is exactly the per-jar argument list of [`TipSplitter::tip`],
+/// so one entry of a batch settles the same way a single call would.
+#[contracttype]
+#[derive(Clone)]
+pub struct TipRequest {
+    /// Slug of the jar to tip, e.g. `"@alice"`.
+    pub jar_id: String,
+    /// Amount of the default token to tip this jar.
+    pub amount: i128,
+    /// Message published in this jar's `tip` event.
+    pub message: String,
 }
 
 /// Compact on-chain representation used by storage migrations. Tuple values
@@ -238,6 +265,8 @@ pub struct Limits {
     pub max_recipients: u32,
     /// Longest tip message, in UTF-8 bytes.
     pub max_message_len: u32,
+    /// Most jars one `tip_many` call may tip.
+    pub max_batch_tips: u32,
     /// Longest accepted jar id, in UTF-8 bytes: the leading `@` plus the
     /// 3–32-character canonical body. `create_jar` and `rename_jar` reject a
     /// longer id with `InvalidJarId`. This is the effective input bound; the
@@ -421,6 +450,10 @@ pub enum Error {
     /// The message is not valid UTF-8 or contains a control character other
     /// than newline. Checked before any funds move (#96).
     InvalidMessage = 36,
+    /// `tip_many` was given a batch with no entries in it.
+    BatchEmpty = 37,
+    /// `tip_many` was given more entries than `MAX_BATCH_TIPS`.
+    BatchTooLarge = 38,
 }
 
 /// The interface a post-tip hook contract must implement (#176).
@@ -1170,6 +1203,64 @@ impl TipSplitter {
         reference: Option<BytesN<32>>,
     ) -> u64 {
         Self::tip_inner(env, from, jar_id, amount, message, reference)
+    }
+
+    /// Tip several jars in one transaction, from a single authorisation.
+    ///
+    /// Tipping two creators otherwise costs two transactions, two wallet
+    /// approvals and two network fees — for micro-tips, a large fraction of the
+    /// whole interaction. This batches them: `from` authorises once, and every
+    /// jar in `tips` is settled in order, each exactly as a single
+    /// [`Self::tip`] call would settle it.
+    ///
+    /// "Exactly" is literal. Every entry goes through the same private
+    /// `settle_tip` the single-jar entry points share, so a batched jar gets the
+    /// same validation, the same minimum-tip check, the same protocol fee, the
+    /// same self-transfer skip, the same held-funds fallback, and its own `tip`
+    /// event carrying its own sequence number. An indexer that already decodes a
+    /// `tip` event needs no change whatsoever to follow a batch.
+    ///
+    /// The batch is bounded by `MAX_BATCH_TIPS` (`BatchTooLarge`) and an empty
+    /// batch is `BatchEmpty`. It is **all-or-nothing**: Soroban rolls the whole
+    /// transaction back if any entry panics, so a batch whose last jar is
+    /// rejected leaves the earlier jars' balances and totals untouched, and no
+    /// sequence number is consumed by the entries that would have settled.
+    ///
+    /// Returns one sequence number per entry, in the same order as `tips`.
+    pub fn tip_many(env: Env, from: Address, tips: Vec<TipRequest>) -> Vec<u64> {
+        // One signature covers the whole batch; no entry re-requires it.
+        from.require_auth();
+        if env.storage().instance().has(&DataKey::Paused) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
+        if tips.is_empty() {
+            panic_with_error!(&env, Error::BatchEmpty);
+        }
+        if tips.len() > MAX_BATCH_TIPS {
+            panic_with_error!(&env, Error::BatchTooLarge);
+        }
+        let token_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        let mut seqs: Vec<u64> = Vec::new(&env);
+        for i in 0..tips.len() {
+            let req = tips.get(i).unwrap();
+            let seq = Self::settle_tip(
+                &env,
+                &from,
+                &req.jar_id,
+                req.amount,
+                &req.message,
+                &token_addr,
+                true,
+                None,
+            );
+            seqs.push_back(seq);
+        }
+        seqs
     }
 
     /// The single transfer loop behind `tip` and `tip_with_ref`.
@@ -2524,6 +2615,7 @@ impl TipSplitter {
             bps_denom: BPS_DENOM,
             max_recipients: MAX_RECIPIENTS,
             max_message_len: MAX_MESSAGE_LEN,
+            max_batch_tips: MAX_BATCH_TIPS,
             max_jar_id_len: MAX_JAR_SLUG_LEN + 1,
         }
     }
