@@ -103,7 +103,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `resume()` | contract `admin` | Lift a pause. Emits a `resume` event. |
 | `is_paused() -> bool` | — | Whether tipping is currently paused. Reads instance storage. |
 | `upgrade(new_wasm_hash)` | contract `admin` | Replace the running contract Wasm while keeping the address and all stored state. Emits an `upgrade` event carrying the new hash. |
-| `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`. Reads no storage. |
+| `get_limits() -> Limits` | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_jar_id_len`. Reads no storage. |
 | `version() -> u32` | — | Which interface shape this deployment speaks. Reads no storage. See [detecting the interface version](#detecting-the-interface-version). |
 | `get_jar_stats(jar_id) -> JarStats` | — | A jar's on-chain tip count and total. Zeros for a jar nobody has tipped; `JarNotFound` if the slug is free. |
 | `get_supporter_stats(jar_id, supporter) -> SupporterStats` | — | One address's tip count and total against one jar. Zeros for an address that has never tipped it; `JarNotFound` if the slug is free. |
@@ -133,7 +133,7 @@ written as raised only when every earlier check has passed.
 | `get_min_tip_amount(jar_id) -> Option<i128>` | — | `JarNotFound` | Read a jar's optional minimum tip amount. Returns `None` if no minimum is set. Panics with `JarNotFound` if the slug is free. |
 | `get_token() -> Address` | — | `NotInitialized` | The USDC token address tips settle in. Reads instance storage; `NotInitialized` if the deploy-time token is absent. |
 | `get_admin() -> Address` | — | `NotInitialized` | The contract admin recorded at deploy time. Reads instance storage; `NotInitialized` if the deploy-time admin is absent. |
-| `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`. Reads no storage. |
+| `get_limits() -> Limits` | — | — | The bounds this contract enforces: `bps_denom`, `max_recipients`, `max_message_len`, `max_jar_id_len`. Reads no storage. |
 
 Two ordering notes that are easy to get wrong:
 
@@ -182,25 +182,41 @@ what a *future* tip would pay each of them, use
 
 ### Reading the contract's limits
 
-`BPS_DENOM`, `MAX_RECIPIENTS` and `MAX_MESSAGE_LEN` are private constants, so a
-client that wants to validate input before paying for a transaction has no way
-to read them. The result was that every client carried its own copy — the tip
-form capped messages at its own number, the splits editor hardcoded the twenty
-recipient limit — and changing a bound here silently desynchronised the stack.
+`BPS_DENOM`, `MAX_RECIPIENTS`, `MAX_MESSAGE_LEN`, `MAX_JAR_SLUG_LEN` and
+`MAX_JAR_ID_LEN` are private constants, so a client that wants to validate
+input before paying for a transaction has no way to read them. The result was
+that every client carried its own copy — the tip form capped messages at its
+own number, the splits editor hardcoded the twenty recipient limit, the
+onboarding form hardcoded 64 for the jar id — and changing a bound here
+silently desynchronised the stack.
 
-`get_limits` returns all three:
+`get_limits` returns all four:
 
 ```rust
 Limits {
     bps_denom: 10_000,       // BPS_DENOM — the denominator every `bps` is a share of
     max_recipients: 20,      // MAX_RECIPIENTS — most recipients in one jar
     max_message_len: 280,    // MAX_MESSAGE_LEN — longest tip message, in UTF-8 bytes
+    max_jar_id_len: 33,      // MAX_JAR_SLUG_LEN + 1 — longest canonical jar id ("@" + 32)
 }
 ```
 
-All three are compile-time constants, so the view reads no storage and costs
+All four are compile-time constants, so the view reads no storage and costs
 the same regardless of contract state. A client can fetch it once at startup
 and cache it for the session.
+
+`max_jar_id_len` is the **effective** input bound, not the 64-byte
+`MAX_JAR_ID_LEN` storage cap. The canonical rule in
+[`jar_id` validation](#jar_id-validation) already caps an id at a leading `@`
+plus 32 characters, so a longer value is rejected with `InvalidJarId` long
+before the storage cap matters; reporting 64 would let an onboarding form
+submit a slug the contract refuses.
+
+**Consumer-facing change:** `max_jar_id_len` is a new field in the map
+`get_limits` returns (#98). A decoder typed against the previous three-field
+`Limits` must add the field, or ignore map keys it does not know, before
+pointing at a deployment that reports it; `version()` stays at 3 because no
+existing function, error code or event changed shape.
 
 `max_message_len` is a **byte** count, not a character count — see
 [Message](#concepts) above. A client showing a remaining-characters indicator
