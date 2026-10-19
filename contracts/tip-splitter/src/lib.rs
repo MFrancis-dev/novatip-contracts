@@ -42,6 +42,13 @@ const MAX_BATCH_TIPS: u32 = 10;
 /// an unbounded id costs unnecessary rent and can produce jars no frontend can
 /// address.
 const MAX_JAR_ID_LEN: u32 = 64;
+/// Shortest slug body, excluding the leading `@`. Mirrors `novatip-backend`'s
+/// `SLUG_REGEX`, so every id a tip page can produce is accepted here.
+const MIN_JAR_SLUG_LEN: u32 = 3;
+/// Longest slug body, excluding the leading `@`. Mirrors the backend as well;
+/// the backend never emits a longer slug, and a jar it cannot link to is dead
+/// weight.
+const MAX_JAR_SLUG_LEN: u32 = 32;
 /// Longest tip message, in UTF-8 bytes, that may ride along in the `tip` event.
 ///
 /// The message is echoed verbatim into the event payload, so an unbounded
@@ -57,6 +64,9 @@ const MAX_JAR_ID_LEN: u32 = 64;
 ///
 /// Clients should count UTF-8 bytes — not `message.length` in JavaScript or
 /// `len(message)` in Rust — to show an accurate remaining-bytes indicator.
+///
+/// Length is only half the contract: the bytes must also be valid UTF-8 text
+/// with no control characters other than `\n` (see `validate_message`).
 const MAX_MESSAGE_LEN: u32 = 280;
 
 /// Highest protocol fee the admin may configure, in basis points (5%).
@@ -364,7 +374,8 @@ pub enum Error {
     DuplicateRecipient = 7,
     /// The tip message exceeds the byte-length limit.
     MessageTooLong = 8,
-    /// The jar id is empty or exceeds the byte-length limit.
+    /// The jar id is not a canonical `@`-prefixed slug: empty, longer than
+    /// the limit, or containing bytes outside `[a-z0-9_-]`.
     InvalidJarId = 9,
     /// Splits list is empty.
     SplitsEmpty = 10,
@@ -430,10 +441,13 @@ pub enum Error {
     JarIdInUse = 34,
     /// `set_fee_bps` was given a fee above `MAX_FEE_BPS` (500 bps, 5%).
     FeeTooHigh = 35,
+    /// The message is not valid UTF-8 or contains a control character other
+    /// than newline. Checked before any funds move (#96).
+    InvalidMessage = 36,
     /// `tip_many` was given a batch with no entries in it.
-    BatchEmpty = 36,
+    BatchEmpty = 37,
     /// `tip_many` was given more entries than `MAX_BATCH_TIPS`.
-    BatchTooLarge = 37,
+    BatchTooLarge = 38,
 }
 
 /// The interface a post-tip hook contract must implement (#176).
@@ -586,9 +600,43 @@ impl TipSplitter {
             .publish((symbol_short!("tk_dis"), token), admin);
     }
 
-    /// Register a new tip jar. `owner` must authorize. `jar_id` must be
-    /// non-empty and at most `MAX_JAR_ID_LEN` bytes. Splits must sum to 100%
-    /// and may not name the same recipient twice.
+    /// Whether `jar_id` is a canonical slug: a leading `@` followed by
+    /// 3–32 lower-case ASCII letters, digits, `_` or `-`.
+    ///
+    /// The contract is the only place that can enforce one shape for every
+    /// client. Without it, `@alice`, `@Alice` and `@alice ` are three distinct
+    /// jars, and the lookalikes are indistinguishable wherever a raw id is
+    /// rendered. The backend's `SLUG_REGEX` is the same rule, so rejecting
+    /// anything else cannot lock out a jar a tip page could create.
+    ///
+    /// Copies at most 33 bytes into a stack buffer; no allocation, so it is
+    /// cheap enough to run before the storage lookup.
+    fn is_valid_jar_id(jar_id: &String) -> bool {
+        let len = jar_id.len();
+        if len > MAX_JAR_ID_LEN || !(MIN_JAR_SLUG_LEN + 1..=MAX_JAR_SLUG_LEN + 1).contains(&len) {
+            return false;
+        }
+        let mut buf = [0u8; (MAX_JAR_SLUG_LEN + 1) as usize];
+        jar_id.copy_into_slice(&mut buf[..len as usize]);
+        if buf[0] != b'@' {
+            return false;
+        }
+        for byte in &buf[1..len as usize] {
+            if !(byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || *byte == b'_'
+                || *byte == b'-')
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Register a new tip jar. `owner` must authorize. `jar_id` must be a
+    /// canonical slug — a leading `@` followed by 3–32 lower-case ASCII
+    /// letters, digits, `_` or `-` — and at most `MAX_JAR_ID_LEN` bytes.
+    /// Splits must sum to 100% and may not name the same recipient twice.
     ///
     /// When the admin has named a registrar (#178), creating a jar
     /// additionally requires that contract to co-sign the exact
@@ -599,7 +647,7 @@ impl TipSplitter {
     /// event log without any on-chain list.
     pub fn create_jar(env: Env, owner: Address, jar_id: String, splits: Vec<Split>) {
         owner.require_auth();
-        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN {
+        if !Self::is_valid_jar_id(&jar_id) {
             panic_with_error!(&env, Error::InvalidJarId);
         }
         // Issue #94: reject the contract itself or its token as jar owner.
@@ -999,7 +1047,7 @@ impl TipSplitter {
     /// The old id stops resolving immediately, and the new id must not already be in use.
     /// Emits a `jar_rnm` event carrying both ids for indexer tracking.
     pub fn rename_jar(env: Env, jar_id: String, new_jar_id: String) {
-        if new_jar_id.is_empty() || new_jar_id.len() > MAX_JAR_ID_LEN {
+        if !Self::is_valid_jar_id(&new_jar_id) {
             panic_with_error!(&env, Error::InvalidJarId);
         }
         let old_key = DataKey::Jar(jar_id.clone());
@@ -1111,8 +1159,9 @@ impl TipSplitter {
     /// and marked `held` in the breakdown, while everyone else is paid normally.
     /// `withdraw_held` releases it once the recipient can receive again (#171).
     ///
-    /// `message` may be at most `MAX_MESSAGE_LEN` bytes; it is rejected before
-    /// any funds move.
+    /// `message` may be at most `MAX_MESSAGE_LEN` bytes, must be valid UTF-8,
+    /// and may not contain control characters other than newline; it is
+    /// rejected before any funds move.
     ///
     /// Returns the tip's sequence number, so the supporter's own client learns
     /// which tip it just sent without waiting for the event log. See
@@ -1335,9 +1384,7 @@ impl TipSplitter {
         if amount < 0 {
             panic_with_error!(env, Error::AmountNegative);
         }
-        if message.len() > MAX_MESSAGE_LEN {
-            panic_with_error!(env, Error::MessageTooLong);
-        }
+        Self::validate_message(env, message);
 
         let jar_key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
@@ -1816,7 +1863,8 @@ impl TipSplitter {
     /// Validated against the same checks `tip` applies so a stored schedule can
     /// actually be paid: the jar must exist, `amount` must be positive and pass
     /// `compute_shares` (no zero-truncated shares, no `i128` overflow) and clear
-    /// any per-jar minimum tip, the message must fit `MAX_MESSAGE_LEN`, and
+    /// any per-jar minimum tip, the message must be valid UTF-8 text with no
+    /// control characters other than newline and fit `MAX_MESSAGE_LEN`, and
     /// `period_ledgers` must be non-zero. The new entry records its first due
     /// ledger (`current + period_ledgers`) and is stored under a fresh id.
     ///
@@ -1839,9 +1887,7 @@ impl TipSplitter {
         if amount < 0 {
             panic_with_error!(&env, Error::AmountNegative);
         }
-        if message.len() > MAX_MESSAGE_LEN {
-            panic_with_error!(&env, Error::MessageTooLong);
-        }
+        Self::validate_message(&env, &message);
 
         let jar_key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
@@ -2189,8 +2235,10 @@ impl TipSplitter {
     ///
     /// Rejects the same amounts `tip` rejects — non-positive, or small enough
     /// that some recipient's share would truncate to zero — so a preview that
-    /// returns at all describes a tip that can go through. Panics with
-    /// `JarNotFound` if the slug is unregistered.
+    /// returns at all describes a tip that can go through. The sign is checked
+    /// first, before the jar lookup and the jar's minimum, matching `tip`'s
+    /// order, so a client that previews and then tips sees the same error
+    /// (#97). Panics with `JarNotFound` if the slug is unregistered.
     ///
     /// One caveat: `tip` withholds a recipient's share when that recipient is
     /// the tipper, rather than making them pay themselves. This view does not
@@ -2199,6 +2247,16 @@ impl TipSplitter {
     /// [`Self::preview_tip`] instead, which takes the sender and matches the
     /// actual payout (#177).
     pub fn preview_split(env: Env, jar_id: String, amount: i128) -> Vec<i128> {
+        // Same precedence as `tip`: an unusable amount is refused before the
+        // jar lookup and before the minimum, so preview and payout report the
+        // identical error for the same amount (#97).
+        if amount == 0 {
+            panic_with_error!(&env, Error::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, Error::AmountNegative);
+        }
+
         let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
             .storage()
@@ -2484,7 +2542,7 @@ impl TipSplitter {
     /// returns a plain `bool` and reads one storage key, so the onboarding form
     /// can run it on every (debounced) keystroke.
     pub fn jar_exists(env: Env, jar_id: String) -> bool {
-        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN {
+        if !Self::is_valid_jar_id(&jar_id) {
             return false;
         }
         env.storage().persistent().has(&DataKey::Jar(jar_id))
@@ -2666,6 +2724,36 @@ impl TipSplitter {
             env.storage()
                 .persistent()
                 .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
+    }
+
+    /// Validate a message's length and content (#96).
+    ///
+    /// A Soroban `String` is a byte buffer with no encoding guarantee, so
+    /// without this check a tipper can attach invalid UTF-8 or embedded
+    /// control bytes and the contract echoes them verbatim into the `tip`
+    /// event. Consumers assume text: the backend writes the message into a
+    /// Postgres text column, which rejects NUL, so such a tip is silently
+    /// dropped by the indexer, and invalid UTF-8 renders differently in every
+    /// client.
+    ///
+    /// Newline is allowed because the tip form offers multi-line input; every
+    /// other control character — including NUL, tab, carriage return and DEL —
+    /// is rejected. `char::is_control` also covers the C1 range, which is only
+    /// reachable through a valid multi-byte sequence.
+    ///
+    /// The check runs before any transfer, so a rejected tip moves no funds.
+    fn validate_message(env: &Env, message: &String) {
+        let len = message.len();
+        if len > MAX_MESSAGE_LEN {
+            panic_with_error!(env, Error::MessageTooLong);
+        }
+        let mut buf = [0u8; MAX_MESSAGE_LEN as usize];
+        message.copy_into_slice(&mut buf[..len as usize]);
+        let text = core::str::from_utf8(&buf[..len as usize])
+            .unwrap_or_else(|_| panic_with_error!(env, Error::InvalidMessage));
+        if text.chars().any(|c| c.is_control() && c != '\n') {
+            panic_with_error!(env, Error::InvalidMessage);
         }
     }
 

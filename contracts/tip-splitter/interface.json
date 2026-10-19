@@ -349,12 +349,16 @@
           "value": 35
         },
         {
-          "name": "BatchEmpty",
+          "name": "InvalidMessage",
           "value": 36
         },
         {
-          "name": "BatchTooLarge",
+          "name": "BatchEmpty",
           "value": 37
+        },
+        {
+          "name": "BatchTooLarge",
+          "value": 38
         }
       ]
     }
