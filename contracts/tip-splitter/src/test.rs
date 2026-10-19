@@ -210,7 +210,7 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
     let tipper = Address::generate(env);
     token_admin.mint(&tipper, &100);
 
-    let jar_id = String::from_str(env, "@ev");
+    let jar_id = String::from_str(env, "@evt1");
     client.create_jar(
         &owner,
         &jar_id,
@@ -771,7 +771,7 @@ fn create_jar_rejects_bad_bps_sum() {
         },
     ];
 
-    let res = client.try_create_jar(&owner, &String::from_str(env, "@x"), &bad);
+    let res = client.try_create_jar(&owner, &String::from_str(env, "@sum-bad"), &bad);
     assert_eq!(res, Err(Ok(Error::SplitSumNot100Pct.into())));
 }
 
@@ -1855,7 +1855,7 @@ fn tip_rejects_nonpositive_amount() {
     let owner = Address::generate(env);
     let alice = Address::generate(env);
     let tipper = Address::generate(env);
-    let jar_id = String::from_str(env, "@a");
+    let jar_id = String::from_str(env, "@aaa");
     let splits = vec![
         env,
         Split {
@@ -3030,9 +3030,9 @@ fn create_jar_rejects_empty_jar_id() {
     assert_eq!(res, Err(Ok(Error::InvalidJarId.into())));
 }
 
-/// A `jar_id` longer than `MAX_JAR_ID_LEN` is rejected — it is used as a
-/// storage key, an event topic, and a public URL slug, so unbounded input
-/// costs unnecessary rent.
+/// A slug body over 32 characters is rejected — it is used as a storage key,
+/// an event topic, and a public URL slug, so unbounded input costs
+/// unnecessary rent and the backend could never link to it.
 #[test]
 fn create_jar_rejects_over_long_jar_id() {
     let s = setup();
@@ -3049,8 +3049,10 @@ fn create_jar_rejects_over_long_jar_id() {
         },
     ];
 
-    // One byte over MAX_JAR_ID_LEN (64).
-    let too_long = String::from_bytes(env, &[b'a'; 65]);
+    // One byte over MAX_JAR_SLUG_LEN (32), after the leading `@`.
+    let mut bytes = [b'a'; 34];
+    bytes[0] = b'@';
+    let too_long = String::from_bytes(env, &bytes);
     let res = client.try_create_jar(&owner, &too_long, &splits);
     assert_eq!(res, Err(Ok(Error::InvalidJarId.into())));
 
@@ -3061,8 +3063,8 @@ fn create_jar_rejects_over_long_jar_id() {
     );
 }
 
-/// A `jar_id` of exactly `MAX_JAR_ID_LEN` bytes is still valid — the bound is
-/// inclusive, so an off-by-one here would reject legitimate jar ids.
+/// The longest slug the backend can produce — `@` plus 32 characters — is
+/// accepted, so an off-by-one in the bound cannot lock out a real creator.
 #[test]
 fn create_jar_accepts_jar_id_at_exact_limit() {
     let s = setup();
@@ -3079,11 +3081,113 @@ fn create_jar_accepts_jar_id_at_exact_limit() {
         },
     ];
 
-    let exact = String::from_bytes(env, &[b'a'; 64]);
-    assert_eq!(exact.len(), 64);
+    let mut bytes = [b'a'; 33];
+    bytes[0] = b'@';
+    let exact = String::from_bytes(env, &bytes);
+    assert_eq!(exact.len(), 33);
     client.create_jar(&owner, &exact, &splits);
 
     assert_eq!(client.get_jar(&exact).splits.len(), 1);
+}
+
+/// The slug charset is canonical: upper case, whitespace, control bytes and a
+/// bare id without `@` are all rejected with `InvalidJarId`, so a lookalike
+/// such as `@Alice` cannot register a jar next to `@alice`.
+#[test]
+fn create_jar_rejects_non_canonical_jar_ids() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let splits = vec![
+        env,
+        Split {
+            to: alice.clone(),
+            bps: 10000,
+        },
+    ];
+
+    let upper = String::from_str(env, "@Alice");
+    assert_eq!(
+        client.try_create_jar(&owner, &upper, &splits),
+        Err(Ok(Error::InvalidJarId.into()))
+    );
+
+    let spaced = String::from_str(env, "@ali ce");
+    assert_eq!(
+        client.try_create_jar(&owner, &spaced, &splits),
+        Err(Ok(Error::InvalidJarId.into()))
+    );
+
+    let nul = String::from_bytes(env, b"@ali\0ce");
+    assert_eq!(
+        client.try_create_jar(&owner, &nul, &splits),
+        Err(Ok(Error::InvalidJarId.into()))
+    );
+
+    let no_at = String::from_str(env, "alice");
+    assert_eq!(
+        client.try_create_jar(&owner, &no_at, &splits),
+        Err(Ok(Error::InvalidJarId.into()))
+    );
+
+    let too_short = String::from_str(env, "@ab");
+    assert_eq!(
+        client.try_create_jar(&owner, &too_short, &splits),
+        Err(Ok(Error::InvalidJarId.into()))
+    );
+
+    // None of them were persisted, and none shadow the canonical id.
+    for id in [&upper, &spaced, &nul, &no_at, &too_short] {
+        assert!(client.try_get_jar(id).is_err());
+    }
+    let canonical = String::from_str(env, "@alice");
+    client.create_jar(&owner, &canonical, &splits);
+    assert_eq!(client.get_jar(&canonical).owner, owner);
+}
+
+/// The destination of `rename_jar` goes through the same canonical rule, so a
+/// jar cannot be moved to a slug no tip page can address.
+#[test]
+fn rename_jar_rejects_non_canonical_new_id() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let original = String::from_str(env, "@original");
+    client.create_jar(
+        &owner,
+        &original,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    for new_id in [
+        String::from_str(env, "@New"),
+        String::from_str(env, "@new id"),
+        String::from_str(env, "@ab"),
+    ] {
+        assert_eq!(
+            client.try_rename_jar(&original, &new_id),
+            Err(Ok(Error::InvalidJarId.into()))
+        );
+    }
+
+    // The failed renames left the jar where it was; a canonical id moves it.
+    assert_eq!(client.get_jar(&original).owner, owner);
+    let renamed = String::from_str(env, "@renamed");
+    client.rename_jar(&original, &renamed);
+    assert_eq!(client.get_jar(&renamed).owner, owner);
+    assert!(client.try_get_jar(&original).is_err());
 }
 
 /// A collaborator's own membership check: a listed recipient gets `true`, an
@@ -3551,6 +3655,97 @@ fn preview_split_enforces_minimum_tip_amount() {
     // Preview at exact minimum succeeds
     let res_exact = client.try_preview_split(&jar_id, &100_i128);
     assert!(res_exact.is_ok());
+}
+
+/// #97: `preview_split` must apply the amount-sign check before the jar's
+/// minimum, exactly as `tip` does, so a client previewing then tipping gets
+/// one consistent error instead of "below the minimum" from one and "enter a
+/// positive amount" from the other.
+#[test]
+fn preview_split_and_tip_agree_on_error_order() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    let jar_id = String::from_str(env, "@previeword");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    client.set_min_tip_amount(&jar_id, &Some(100_i128));
+    let message = String::from_str(env, "");
+
+    for (amount, expected) in [
+        (0_i128, Error::AmountZero),
+        (-5_i128, Error::AmountNegative),
+    ] {
+        let preview = client.try_preview_split(&jar_id, &amount).unwrap_err();
+        let tip = client
+            .try_tip(&tipper, &jar_id, &amount, &message)
+            .unwrap_err();
+        assert_eq!(
+            preview,
+            Ok(expected.into()),
+            "a non-positive amount is a sign error even when a minimum is set"
+        );
+        assert_eq!(
+            preview, tip,
+            "preview_split and tip must report the same error for {amount}"
+        );
+    }
+
+    // Between 1 and the minimum, both still report the minimum rather than a
+    // sign error: the order change must not swallow the minimum check.
+    let preview = client.try_preview_split(&jar_id, &99_i128).unwrap_err();
+    let tip = client
+        .try_tip(&tipper, &jar_id, &99_i128, &message)
+        .unwrap_err();
+    assert_eq!(preview, Ok(Error::BelowMinTipAmount.into()));
+    assert_eq!(preview, tip);
+}
+
+/// The sign check is unconditional: it applies to a jar with no minimum too,
+/// where `preview_split` previously reached `compute_shares` and reported the
+/// same codes only incidentally.
+#[test]
+fn preview_split_rejects_non_positive_amounts_without_a_minimum() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@previewzero");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    assert_eq!(
+        client.try_preview_split(&jar_id, &0_i128),
+        Err(Ok(Error::AmountZero.into()))
+    );
+    assert_eq!(
+        client.try_preview_split(&jar_id, &-5_i128),
+        Err(Ok(Error::AmountNegative.into()))
+    );
 }
 
 /// A random valid bps distribution over `n` recipients: every share is at
@@ -4197,7 +4392,7 @@ fn recurring_tip_validation() {
     let owner = Address::generate(env);
     let alice = Address::generate(env);
     let supporter = Address::generate(env);
-    let jar_id = String::from_str(env, "@v");
+    let jar_id = String::from_str(env, "@vvv");
     client.create_jar(
         &owner,
         &jar_id,
@@ -4531,8 +4726,8 @@ fn supporter_stats_are_independent_across_jars() {
     let supporter = Address::generate(env);
     token_admin.mint(&supporter, &10_000);
 
-    let first = String::from_str(env, "@jarA");
-    let second = String::from_str(env, "@jarB");
+    let first = String::from_str(env, "@jara");
+    let second = String::from_str(env, "@jarb");
     client.create_jar(
         &owner,
         &first,
@@ -4750,7 +4945,7 @@ fn version_reports_the_shape_without_reading_storage() {
     let owner = Address::generate(&env);
     client.create_jar(
         &owner,
-        &String::from_str(&env, "@v"),
+        &String::from_str(&env, "@vvv"),
         &vec![
             &env,
             Split {
@@ -6389,9 +6584,9 @@ enum Op {
 
 fn op_strategy() -> impl Strategy<Value = Op> {
     let slugs = prop::sample::select(std::vec![
-        std::string::String::from("@a"),
-        std::string::String::from("@b"),
-        std::string::String::from("@c"),
+        std::string::String::from("@aaa"),
+        std::string::String::from("@bbb"),
+        std::string::String::from("@ccc"),
     ]);
     let addr_idx = 0..4usize;
     prop_oneof![
@@ -6789,6 +6984,7 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::ContractPaused, 33),
         (Error::JarIdInUse, 34),
         (Error::FeeTooHigh, 35),
+        (Error::InvalidMessage, 36),
     ];
 
     for (variant, expected) in codes {
@@ -7497,12 +7693,16 @@ fn tip_stale_authorization_is_rejected_after_ownership_and_splits_change() {
     assert_eq!(token.balance(&bob), 0);
 }
 
+/// `jar_exists` is the onboarding form's keystroke check, so it must answer
+/// `false` for ids `create_jar` would refuse rather than panicking on them.
 #[test]
 fn jar_exists_rejects_slugs_create_jar_would_reject() {
     let s = setup();
     let client = TipSplitterClient::new(&s.env, &s.contract);
     assert!(!client.jar_exists(&String::from_str(&s.env, "")));
     assert!(!client.jar_exists(&String::from_str(&s.env, &"x".repeat(65))));
+    assert!(!client.jar_exists(&String::from_str(&s.env, "@Alice")));
+    assert!(!client.jar_exists(&String::from_str(&s.env, "@ab")));
 }
 
 #[test]
@@ -8172,4 +8372,167 @@ fn non_admin_cannot_upgrade() {
     // Non-admin tries to upgrade - should fail with auth error
     let result = client.try_upgrade(&new_hash);
     assert!(result.is_err());
+}
+
+// ===========================================================================
+// #96 — message content validation
+// ===========================================================================
+
+/// A Soroban `String` is a raw byte buffer, so invalid UTF-8 is representable
+/// and would otherwise be echoed into the `tip` event where every consumer
+/// decodes it differently. It must be rejected before any transfer.
+#[test]
+fn tip_rejects_invalid_utf8_message() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &500);
+
+    let jar_id = String::from_str(env, "@utf8");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // 0xc3 starts a two-byte sequence but 0x28 is not a continuation byte.
+    let invalid = String::from_bytes(env, &[0x00, 0xc3, 0x28]);
+    let res = client.try_tip(&tipper, &jar_id, &100, &invalid);
+    assert_eq!(res, Err(Ok(Error::InvalidMessage.into())));
+
+    assert_eq!(token.balance(&alice), 0, "alice must not have been paid");
+    assert_eq!(
+        token.balance(&tipper),
+        500,
+        "tipper balance must be unchanged"
+    );
+    assert_eq!(
+        client.get_tip_count(),
+        0,
+        "rejected tip must not be counted"
+    );
+}
+
+/// An embedded NUL is valid UTF-8 (U+0000) but Postgres `text` rejects it, so
+/// the indexer silently drops the whole tip. It must be rejected at the
+/// contract boundary.
+#[test]
+fn tip_rejects_message_with_embedded_nul() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &500);
+
+    let jar_id = String::from_str(env, "@nul");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    let with_nul = String::from_bytes(env, b"hello\0world");
+    let res = client.try_tip(&tipper, &jar_id, &100, &with_nul);
+    assert_eq!(res, Err(Ok(Error::InvalidMessage.into())));
+
+    assert_eq!(token.balance(&alice), 0);
+    assert_eq!(token.balance(&tipper), 500);
+}
+
+/// Every control character other than newline is rejected — the tip form only
+/// needs line breaks. Tab, carriage return and DEL are all outside what a text
+/// column should receive.
+#[test]
+fn tip_rejects_control_characters_but_allows_newline() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+
+    let jar_id = String::from_str(env, "@ctrl");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    for bytes in [b"a\tb".as_slice(), b"a\rb".as_slice(), b"a\x7fb".as_slice()] {
+        let message = String::from_bytes(env, bytes);
+        assert_eq!(
+            client.try_tip(&tipper, &jar_id, &100, &message),
+            Err(Ok(Error::InvalidMessage.into())),
+            "control bytes must be rejected"
+        );
+    }
+
+    // Newline is the one allowed control character: multi-line messages are
+    // accepted and the funds move.
+    let multi_line = String::from_str(env, "first line\nsecond line");
+    client.tip(&tipper, &jar_id, &100, &multi_line);
+    assert_eq!(token.balance(&alice), 100);
+    assert_eq!(token.balance(&tipper), 900);
+}
+
+/// A recurring schedule keeps its message on-chain and republishes it on every
+/// collection, so it shares the tip's content validation.
+#[test]
+fn create_recurring_rejects_invalid_message() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let supporter = Address::generate(env);
+    let jar_id = String::from_str(env, "@recmsg");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    let with_nul = String::from_bytes(env, b"monthly\0tip");
+    let res = client.try_create_recurring(&supporter, &jar_id, &500, &100, &with_nul);
+    assert_eq!(res, Err(Ok(Error::InvalidMessage.into())));
 }
