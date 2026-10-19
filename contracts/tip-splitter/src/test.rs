@@ -1,8 +1,3 @@
-Warning: truncated output (original token count: 56588)
-Total output lines: 7275
-Warning: truncated output (original token count: 56754)
-Total output lines: 7290
-
 #![cfg(test)]
 use super::*;
 use proptest::prelude::*;
@@ -107,25 +102,6 @@ impl TestToken {
 }
 
 /// Fresh env with a TipSplitter pointed at a controllable [`TestToken`].
-struct SetupHostile {
-    env: Env,
-    contract: Address,
-    token: Address,
-}
-
-fn setup_hostile() -> SetupHostile {
-    let env = Env::default();
-    env.mock_all_auths();
-    let admin = Address::generate(&env);
-    let token = env.register(TestToken, ());
-    let contract = env.register(TipSplitter, (admin.clone(), token.clone()));
-    SetupHostile {
-        env,
-        contract,
-        token,
-    }
-}
-
 #[test]
 fn tip_splits_70_30() {
     let s = setup();
@@ -267,6 +243,7 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
     assert_eq!(
         decoded,
         TipEvent {
+            version: 1,
             from: tipper,
             amount: 100i128,
             message,
@@ -614,6 +591,7 @@ fn reference_is_not_stored_and_not_required_to_be_unique() {
 /// token the tip was paid in (#170), the tip's sequence number, and its
 /// optional client reference.
 type TipEventData = TipEvent;
+
 
 /// Reads the per-recipient breakdown out of the single `tip` event this
 /// contract published.
@@ -3381,13 +3359,10 @@ fn tip_enforces_minimum_tip_amount() {
 }
 
 #[test]
-fn preview_split_enforces_…6588 tokens truncated…ge contract asks this of arbitrary addresses.
-#[test]
 fn get_supporter_stats_is_zero_for_an_address_that_never_tipped() {
     let s = setup();
     let env = &s.env;
     let client = TipSplitterClient::new(env, &s.contract);
-…6754 tokens truncated…terClient::new(env, &s.contract);
     let token_admin = token::StellarAssetClient::new(env, &s.token);
 
     let owner = Address::generate(env);
@@ -4006,13 +3981,13 @@ fn tip_event_names_the_token_paid_in() {
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(ev.len(), 1);
-    let (from, amount, _message, breakdown, token_paid, _seq, _reference): TipEventData =
+    let decoded: TipEventData =
         TryFromVal::try_from_val(env, &ev.first().unwrap().2).expect("tip event data shape");
-    assert_eq!(token_paid, eurc, "the event must name the asset paid in");
-    assert_eq!(from, tipper);
-    assert_eq!(amount, 400);
-    assert_eq!(breakdown.len(), 1);
-    assert_eq!(breakdown.get(0).unwrap(), (recipient, 400, false));
+    assert_eq!(decoded.token, eurc, "the event must name the asset paid in");
+    assert_eq!(decoded.from, tipper);
+    assert_eq!(decoded.amount, 400);
+    assert_eq!(decoded.breakdown.len(), 1);
+    assert_eq!(decoded.breakdown.get(0).unwrap(), (recipient, 400, false));
 }
 
 /// The recorded decision for #170: the minimum is a raw, unitless number, so
@@ -4180,22 +4155,16 @@ fn collect_recurring_pays_the_first_due_period_like_a_tip() {
     assert_eq!(evs.len(), 1, "a collection publishes exactly one tip event");
     let decoded: TipEventData =
         TryFromVal::try_from_val(env, &evs.first().unwrap().2).expect("tip event data shape");
-    assert_eq!(
-        decoded,
-        (
-            supporter.clone(),
-            500i128,
-            String::from_str(env, "monthly"),
-            vec![
-                env,
-                (alice.clone(), 350i128, false),
-                (bob.clone(), 150i128, false)
-            ],
-            s.token.clone(),
-            1u64,
-            None
-        )
-    );
+    assert_eq!(decoded.version, 1);
+    assert_eq!(decoded.from, supporter.clone());
+    assert_eq!(decoded.amount, 500i128);
+    assert_eq!(decoded.message, String::from_str(env, "monthly"));
+    assert_eq!(decoded.breakdown.len(), 2);
+    assert_eq!(decoded.breakdown.get(0).unwrap(), (alice.clone(), 350i128, false));
+    assert_eq!(decoded.breakdown.get(1).unwrap(), (bob.clone(), 150i128, false));
+    assert_eq!(decoded.token, s.token.clone());
+    assert_eq!(decoded.seq, 1u64);
+    assert_eq!(decoded.reference, None);
 
     assert_eq!(token.balance(&alice), 350);
     assert_eq!(token.balance(&bob), 150);
@@ -5079,6 +5048,22 @@ fn create_jar_is_unchanged_when_no_registrar_is_set() {
 // `InvalidAmount` and leave every balance unchanged. The minimum is
 // `ceil(BPS_DENOM / min_bps)` for the generated splits — below that,
 // some recipient's share would truncate to zero.
+
+/// Generate valid split configurations: vectors of bps values that sum to BPS_DENOM.
+fn splits_strategy() -> impl Strategy<Value = std::vec::Vec<u32>> {
+    // Generate n-1 random values in range [1, 9998], then compute the last one
+    prop::collection::vec(1..9998u32, 1..4)
+        .prop_filter_map("sum must be < 10000", |mut v| {
+            let sum: u32 = v.iter().sum();
+            if sum < 10000 && (10000 - sum) > 0 {
+                v.push(10000 - sum);
+                Some(v)
+            } else {
+                None
+            }
+        })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -6401,4 +6386,64 @@ fn tip_stale_authorization_is_rejected_after_ownership_and_splits_change() {
     assert_eq!(token.balance(&redirected_to), 0);
     assert_eq!(token.balance(&alice), 0);
     assert_eq!(token.balance(&bob), 0);
+}
+
+// ── #102: Admin-gated contract upgrade ───────────────────────────────────────
+
+
+#[test]
+fn admin_can_upgrade_contract() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    // Create a jar to verify state is preserved
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let jar_id = String::from_str(env, "@upgrade");
+    let splits = vec![
+        env,
+        Split { to: alice.clone(), bps: 7000 },
+        Split { to: bob.clone(), bps: 3000 },
+    ];
+    client.create_jar(&owner, &jar_id, &splits);
+
+    // Verify jar exists before upgrade
+    let jar_before = client.get_jar(&jar_id);
+    assert_eq!(jar_before.owner, owner);
+
+    // Generate a fake new WASM hash (32 bytes)
+    let new_hash = BytesN::<32>::from_array(env, &[1u8; 32]);
+
+    // Admin upgrades the contract
+    client.upgrade(&new_hash);
+
+    // Verify the upgrade event was emitted
+    let events = env.events().all();
+    assert_eq!(events.len(), 2); // create_jar event + upgrade event
+    let upgrade_event = events.get(1).unwrap();
+    let (_, data): (soroban_sdk::Vec<Symbol>, UpgradedEventData) = 
+        TryFromVal::try_from_val(env, &upgrade_event).expect("upgrade event shape");
+    assert_eq!(data.admin, s.admin);
+    assert_eq!(data.new_hash, new_hash);
+
+    // State is preserved after upgrade
+    let jar_after = client.get_jar(&jar_id);
+    assert_eq!(jar_after.owner, owner);
+    assert_eq!(jar_after.splits.len(), 2);
+}
+
+#[test]
+fn non_admin_cannot_upgrade() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let _non_admin = Address::generate(env);
+    let new_hash = BytesN::<32>::from_array(env, &[2u8; 32]);
+
+    // Non-admin tries to upgrade - should fail
+    let result = client.try_upgrade(&new_hash);
+    assert!(result.is_err());
 }

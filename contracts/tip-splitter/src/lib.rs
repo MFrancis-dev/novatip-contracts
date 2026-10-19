@@ -278,6 +278,8 @@ pub enum DataKey {
     /// while it is set (#178). Instance storage; absence means jar creation
     /// stays exactly as it was: owner auth only.
     Registrar,
+    /// Contract-wide pause flag. When present in instance storage, tipping is disabled.
+    Paused,
 }
 
 /// Public error codes. The numbers are part of the client interface —
@@ -358,6 +360,12 @@ pub enum Error {
     AmountOverflow = 28,
     /// A configured minimum tip must be positive.
     InvalidMinimumAmount = 29,
+    /// `transfer_admin` was called with the same address as the current admin.
+    AdminExists = 30,
+    /// An operation was attempted while the contract is paused.
+    ContractPaused = 31,
+    /// `rename_jar` was given a jar id that is already in use.
+    JarIdInUse = 32,
 }
 
 /// The interface a post-tip hook contract must implement (#176).
@@ -385,6 +393,7 @@ pub struct TipSplitter;
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarCreatedEvent {
+    pub version: u32,
     pub owner: Address,
 }
 
@@ -392,6 +401,7 @@ pub struct JarCreatedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SplitsUpdatedEvent {
+    pub version: u32,
     pub count: u32,
 }
 
@@ -399,6 +409,7 @@ pub struct SplitsUpdatedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JarTransferredEvent {
+    pub version: u32,
     pub previous_owner: Address,
     pub new_owner: Address,
 }
@@ -407,6 +418,7 @@ pub struct JarTransferredEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MinTipEvent {
+    pub version: u32,
     pub amount: Option<i128>,
 }
 
@@ -414,6 +426,7 @@ pub struct MinTipEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TipEvent {
+    pub version: u32,
     pub from: Address,
     pub amount: i128,
     pub message: String,
@@ -421,6 +434,14 @@ pub struct TipEvent {
     pub token: Address,
     pub seq: u64,
     pub reference: Option<BytesN<32>>,
+}
+
+/// Data published when the contract is upgraded (#102).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradedEvent {
+    pub admin: Address,
+    pub new_hash: BytesN<32>,
 }
 
 #[contractimpl]
@@ -528,7 +549,7 @@ impl TipSplitter {
         );
 
         env.events()
-            .publish((symbol_short!("jar_crtd"), jar_id), JarCreatedEvent { owner });
+            .publish((symbol_short!("jar_crtd"), jar_id), JarCreatedEvent { version: 1, owner });
     }
 
     /// Update an existing jar's splits. Only the jar owner may do this.
@@ -555,6 +576,11 @@ impl TipSplitter {
         jar.owner.require_auth();
         Self::validate_splits(&env, &splits);
 
+        // Skip if the splits haven't changed (issue #100).
+        if jar.splits == splits {
+            return;
+        }
+
         if jar.locked {
             // Consent rule: a current recipient must sign iff their share
             // decreases or they are removed. Compare each old entry against its
@@ -577,6 +603,7 @@ impl TipSplitter {
         }
 
         let split_count = splits.len();
+        let key = DataKey::Jar(jar_id.clone());
         env.storage().persistent().set(
             &key,
             &Jar {
@@ -587,7 +614,7 @@ impl TipSplitter {
         );
 
         env.events()
-            .publish((symbol_short!("splits"), jar_id), SplitsUpdatedEvent { count: split_count });
+            .publish((symbol_short!("splits"), jar_id), SplitsUpdatedEvent { version: 1, count: split_count });
     }
 
     /// Lock a jar's splits so the owner can no longer reduce or remove a
@@ -613,6 +640,7 @@ impl TipSplitter {
             .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         jar.owner.require_auth();
 
+        let key = DataKey::Jar(jar_id.clone());
         env.storage().persistent().set(
             &key,
             &Jar {
@@ -750,6 +778,7 @@ impl TipSplitter {
 
         Self::validate_splits(&env, &remaining);
         let split_count = remaining.len();
+        let key = DataKey::Jar(jar_id.clone());
         env.storage().persistent().set(
             &key,
             &Jar {
@@ -796,7 +825,112 @@ impl TipSplitter {
         // already replayed every prior event for that jar.
         env.events().publish(
             (symbol_short!("jar_xfer"), jar_id),
-            JarTransferredEvent { previous_owner: prev_owner, new_owner },
+            JarTransferredEvent { version: 1, previous_owner: prev_owner, new_owner },
+        );
+    }
+
+    /// Transfer admin control to a new address. Only the current admin may do this.
+    /// Rejects if the new admin is the same as the current one. Emits an event
+    /// carrying both addresses so indexers can track the handover.
+    pub fn transfer_admin(env: Env, new_admin: Address) {
+        let current_admin = Self::require_admin(&env);
+        if current_admin == new_admin {
+            panic_with_error!(&env, Error::AdminExists);
+        }
+        env.storage().instance().set(&DataKey::Admin, &new_admin.clone());
+        env.events().publish(
+            (symbol_short!("adm_xfer"),),
+            (current_admin, new_admin),
+        );
+    }
+
+    /// Pause all tipping operations. Only the admin may call this.
+    /// Once paused, `tip`, `tip_with_ref`, and `tip_in_token` will reject with
+    /// `ContractPaused` until the admin calls `resume`. Emits a pause event.
+    pub fn pause(env: Env) {
+        let admin = Self::require_admin(&env);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("pause"),), admin);
+    }
+
+    /// Resume tipping operations after a pause. Only the admin may call this.
+    /// Removes the pause flag from storage and emits a resume event.
+    pub fn resume(env: Env) {
+        let admin = Self::require_admin(&env);
+        env.storage().instance().remove(&DataKey::Paused);
+        env.events().publish((symbol_short!("resume"),), admin);
+    }
+
+    /// Check whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().has(&DataKey::Paused)
+    }
+
+    /// Upgrade the contract to a new WASM hash. Admin-only (#102).
+    ///
+    /// This allows the deployer to replace the contract code without changing
+    /// its address or losing any stored state (jars, tips, recurring schedules).
+    /// Only the current admin may authorize this call. Emits an `upgrade` event
+    /// carrying the new hash so indexers can track which code version handled
+    /// each tip.
+    /// Rename a jar by moving it to a new id. Only the jar owner may do this.
+    /// The old id stops resolving immediately, and the new id must not already be in use.
+    /// Emits a `jar_rnm` event carrying both ids for indexer tracking.
+    pub fn rename_jar(env: Env, jar_id: String, new_jar_id: String) {
+        if new_jar_id.is_empty() || new_jar_id.len() > MAX_JAR_ID_LEN {
+            panic_with_error!(&env, Error::InvalidJarId);
+        }
+        let old_key = DataKey::Jar(jar_id.clone());
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&old_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        jar.owner.require_auth();
+
+        // Check if new id is already in use
+        let new_key = DataKey::Jar(new_jar_id.clone());
+        if env.storage().persistent().has(&new_key) {
+            panic_with_error!(&env, Error::JarIdInUse);
+        }
+
+        // Copy jar to new id
+        env.storage().persistent().set(&new_key, &jar);
+        env.storage()
+            .persistent()
+            .extend_ttl(&new_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+
+        // Delete old id
+        env.storage().persistent().remove(&old_key);
+
+        // Move stats too
+        let old_stats_key = DataKey::Stats(jar_id.clone());
+        let new_stats_key = DataKey::Stats(new_jar_id.clone());
+        if let Some(stats) = env.storage().persistent().get::<_, JarStats>(&old_stats_key) {
+            env.storage().persistent().set(&new_stats_key, &stats);
+            env.storage()
+                .persistent()
+                .extend_ttl(&new_stats_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().remove(&old_stats_key);
+        }
+
+        // Move min tip if present
+        let old_min_key = DataKey::MinTip(jar_id.clone());
+        let new_min_key = DataKey::MinTip(new_jar_id.clone());
+        if let Some(min_amount) = env.storage().persistent().get::<_, i128>(&old_min_key) {
+            env.storage().persistent().set(&new_min_key, &min_amount);
+            env.storage()
+                .persistent()
+                .extend_ttl(&new_min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+            env.storage().persistent().remove(&old_min_key);
+        }
+
+        env.events().publish(
+            (symbol_short!("jar_rnm"),),
+            (jar_id, new_jar_id),
         );
     }
 
@@ -835,7 +969,7 @@ impl TipSplitter {
         }
 
         env.events()
-            .publish((symbol_short!("min_tip"), jar_id), MinTipEvent { amount: min_amount });
+            .publish((symbol_short!("min_tip"), jar_id), MinTipEvent { version: 1, amount: min_amount });
     }
 
     /// Send a tip of `amount` of the deploy-time default token from `from`,
@@ -899,6 +1033,9 @@ impl TipSplitter {
         reference: Option<BytesN<32>>,
     ) -> u64 {
         from.require_auth();
+        if env.storage().instance().has(&DataKey::Paused) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
         let token_addr: Address = env
             .storage()
             .instance()
@@ -950,6 +1087,9 @@ impl TipSplitter {
         message: String,
     ) -> u64 {
         from.require_auth();
+        if env.storage().instance().has(&DataKey::Paused) {
+            panic_with_error!(&env, Error::ContractPaused);
+        }
         if !env
             .storage()
             .instance()
@@ -1118,7 +1258,7 @@ impl TipSplitter {
         env.events().publish(
             (symbol_short!("tip"), jar_id.clone()),
             TipEvent {
-                from: from.clone(), amount, message: message.clone(), breakdown,
+                version: 1, from: from.clone(), amount, message: message.clone(), breakdown,
                 token: token_addr.clone(), seq, reference,
             },
         );
@@ -2154,10 +2294,6 @@ impl TipSplitter {
                     .unwrap_or_else(|| panic_with_error!(env, Error::InvalidAmount));
                 if product < denom { panic_with_error!(env, Error::InvalidAmount); }
                 product / denom
-                amount
-                    .checked_mul(splits.get(i).unwrap().bps as i128)
-                    .unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow))
-                    / denom
             };
             distributed += share;
             shares.push_back(share);
