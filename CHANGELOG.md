@@ -5,6 +5,8 @@ All notable changes to `novatip-contracts` are documented here.
 ## [Unreleased]
 
 ### Added
+- Protocol fee (#79): `set_fee_bps(fee_bps)` (admin only, default `0`, capped at 500 bps / 5%) and `get_fee_bps() -> u32`. The fee is taken from each tip before the split and paid to the admin; recipients' total plus the fee equals the tip exactly. New `fee_set` event, new error `FeeTooHigh` (35), and `scripts/set-fee.sh` (defaults to the intended 100 bps)
+- Tests for authority moving with jar ownership (#75), multi-byte messages at the 280-byte limit (#74), and a tipper who holds a share in the distribution property test (#78)
 - `version() -> u32` returns `INTERFACE_VERSION`, a compile-time constant bumped whenever the public interface changes shape (#169)
 - `get_jar_stats(jar_id) -> JarStats { tip_count, total }` and `get_supporter_stats(jar_id, supporter) -> SupporterStats` report tip totals kept on-chain (#167, #168)
 - `allow_token(token)` / `disallow_token(token)`, `is_token_allowed(token)`, and `tip_in_token(from, jar_id, token, amount, message)` for multi-asset tips (#170)
@@ -19,6 +21,9 @@ All notable changes to `novatip-contracts` are documented here.
 - Error codes 14 `TokenNotAllowed`, 15 `CannotDisallowDefault`, 16 `StatsOverflow`
 
 ### Changed (breaking: event payload)
+- The `tip` event (`TipEvent`) gained a `fee: i128` field: the protocol fee the tip moved to the admin (#79). `version()` is now `3`
+- `collect_recurring` publishes the same `TipEvent` struct as `tip`; it was still publishing the old positional tuple
+- A tipper who is also a recipient now keeps their own share; it used to roll into the last recipient, so they paid it out to someone else (#78). `preview_tip` reports the new amounts
 - The `tip` event's data tuple gained `token: Address` (5th element) and `tip_count: u64` (6th element)
 - `tip` withholds a recipient's share when that recipient is also the tipper
 

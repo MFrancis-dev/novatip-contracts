@@ -102,6 +102,25 @@ impl TestToken {
 }
 
 /// Fresh env with a TipSplitter pointed at a controllable [`TestToken`].
+struct SetupHostile {
+    env: Env,
+    contract: Address,
+    token: Address,
+}
+
+fn setup_hostile() -> SetupHostile {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let token = env.register(TestToken, ());
+    let contract = env.register(TipSplitter, (admin.clone(), token.clone()));
+    SetupHostile {
+        env,
+        contract,
+        token,
+    }
+}
+
 #[test]
 fn tip_splits_70_30() {
     let s = setup();
@@ -135,14 +154,6 @@ fn tip_splits_70_30() {
     assert_eq!(token.balance(&alice), 70);
     assert_eq!(token.balance(&bob), 30);
     assert_eq!(token.balance(&tipper), 900);
-}
-
-#[test]
-fn jar_exists_rejects_slugs_create_jar_would_reject() {
-    let s = setup();
-    let client = TipSplitterClient::new(&s.env, &s.contract);
-    assert!(!client.jar_exists(&String::from_str(&s.env, "")));
-    assert!(!client.jar_exists(&String::from_str(&s.env, &"x".repeat(65))));
 }
 
 #[test]
@@ -246,6 +257,7 @@ fn tip_emits_tip_event_with_expected_topics_and_data() {
             version: 1,
             from: tipper,
             amount: 100i128,
+            fee: 0,
             message,
             breakdown: vec![env, (alice, 100i128, false)],
             token: s.token.clone(),
@@ -592,9 +604,6 @@ fn reference_is_not_stored_and_not_required_to_be_unique() {
 /// optional client reference.
 type TipEventData = TipEvent;
 
-type UpgradedEventData = UpgradedEvent;
-
-
 /// Reads the per-recipient breakdown out of the single `tip` event this
 /// contract published.
 fn tip_breakdown(env: &Env, contract: &Address, jar_id: &String) -> std::vec::Vec<(Address, i128)> {
@@ -705,8 +714,8 @@ fn tip_event_breakdown_reports_zero_for_a_skipped_self_transfer() {
     let tipper = Address::generate(env);
     token_admin.mint(&tipper, &100);
 
-    // The tipper is listed first; `tip` skips paying them and the final
-    // recipient absorbs the whole amount.
+    // The tipper is listed first; `tip` skips paying them and they keep
+    // their half, while alice receives exactly hers (#78).
     let jar_id = String::from_str(env, "@selftip");
     client.create_jar(
         &owner,
@@ -729,11 +738,11 @@ fn tip_event_breakdown_reports_zero_for_a_skipped_self_transfer() {
     let breakdown = tip_breakdown(env, &s.contract, &jar_id);
     assert_eq!(
         breakdown,
-        std::vec![(tipper.clone(), 0i128), (alice.clone(), 100i128)],
+        std::vec![(tipper.clone(), 0i128), (alice.clone(), 50i128)],
         "a skipped self-transfer is reported as 0, not as the notional share"
     );
-    assert_eq!(token.balance(&alice), 100);
-    assert_eq!(token.balance(&tipper), 0);
+    assert_eq!(token.balance(&alice), 50);
+    assert_eq!(token.balance(&tipper), 50);
     // Every entry still names its recipient in split order, so an indexer can
     // tell "listed but paid nothing" apart from "not listed at all".
     assert_eq!(breakdown[0].0, tipper);
@@ -1938,6 +1947,93 @@ fn tip_accepts_message_at_exact_limit() {
     assert_eq!(token.balance(&tipper), 400);
 }
 
+/// A single-recipient jar for the multi-byte message tests, with `tipper`
+/// funded for one tip of 100.
+fn message_limit_jar(s: &Setup, jar_id: &str) -> (String, Address, Address) {
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &100);
+
+    let jar_id = String::from_str(env, jar_id);
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    (jar_id, alice, tipper)
+}
+
+/// `MAX_MESSAGE_LEN` is a byte budget, not a character budget (#74). 140
+/// accented characters are 280 UTF-8 bytes — exactly the limit — so the tip
+/// goes through even though the message is only half as many visible
+/// characters as an ASCII message at the same limit.
+#[test]
+fn tip_accepts_multibyte_message_at_exact_byte_limit() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let (jar_id, alice, tipper) = message_limit_jar(&s, "@mb_atlimit");
+
+    // 'é' is U+00E9, two bytes in UTF-8 (0xC3 0xA9).
+    assert_eq!("é".len(), 2);
+    let text = "é".repeat(140);
+    assert_eq!(text.len(), 280, "280 UTF-8 bytes");
+    assert_eq!(text.chars().count(), 140, "but only 140 characters");
+
+    let message = String::from_str(env, &text);
+    assert_eq!(message.len(), MAX_MESSAGE_LEN, "the contract counts bytes");
+    client.tip(&tipper, &jar_id, &100, &message);
+
+    assert_eq!(token.balance(&alice), 100);
+    assert_eq!(token.balance(&tipper), 0);
+}
+
+/// One byte over the budget is rejected even though the message is far below
+/// 280 characters (#74): 139 two-byte characters plus one three-byte '€' is
+/// 281 bytes in 140 characters. Rejected before any funds move.
+#[test]
+fn tip_rejects_multibyte_message_one_byte_over_limit() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let (jar_id, alice, tipper) = message_limit_jar(&s, "@mb_over");
+
+    // '€' is U+20AC, three bytes in UTF-8 (0xE2 0x82 0xAC).
+    assert_eq!("€".len(), 3);
+    let text = std::format!("{}€", "é".repeat(139));
+    assert_eq!(text.len(), 281, "139 * 2 + 3 = 281 UTF-8 bytes");
+    assert_eq!(text.chars().count(), 140, "but only 140 characters");
+
+    let message = String::from_str(env, &text);
+    assert_eq!(
+        message.len(),
+        MAX_MESSAGE_LEN + 1,
+        "the contract counts bytes"
+    );
+    let res = client.try_tip(&tipper, &jar_id, &100, &message);
+    assert_eq!(res, Err(Ok(Error::MessageTooLong.into())));
+
+    assert_eq!(token.balance(&alice), 0, "alice must not have been paid");
+    assert_eq!(
+        token.balance(&tipper),
+        100,
+        "tipper balance must be unchanged"
+    );
+}
+
 #[test]
 fn update_splits_changes_distribution() {
     let s = setup();
@@ -2502,7 +2598,6 @@ fn transfer_jar_ownership_moves_control_to_new_owner() {
     let owner = Address::generate(env);
     let new_owner = Address::generate(env);
     let alice = Address::generate(env);
-    let bob = Address::generate(env);
 
     let jar_id = String::from_str(env, "@handoff");
     client.create_jar(
@@ -2521,8 +2616,70 @@ fn transfer_jar_ownership_moves_control_to_new_owner() {
     assert_eq!(client.get_jar(&jar_id).owner, new_owner);
     // Splits must survive the transfer untouched.
     assert_eq!(client.get_jar(&jar_id).splits.get(0).unwrap().to, alice);
+}
 
-    // The new owner can now update splits.
+/// Creates a single-recipient jar owned by `owner` and transfers it to
+/// `new_owner` under `mock_all_auths`, so the authority tests below start
+/// from a completed handoff and only the call under test runs with strict
+/// `mock_auths`.
+fn handed_off_jar(
+    env: &Env,
+    client: &TipSplitterClient,
+    jar_id: &String,
+    owner: &Address,
+    new_owner: &Address,
+    recipient: &Address,
+) {
+    client.create_jar(
+        owner,
+        jar_id,
+        &vec![
+            env,
+            Split {
+                to: recipient.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    client.transfer_jar_ownership(jar_id, new_owner);
+}
+
+/// Mocks exactly one signature: `signer` authorizing
+/// `update_splits(jar_id, splits)` on the contract, and nothing else.
+fn mock_update_splits_auth(
+    env: &Env,
+    contract: &Address,
+    signer: &Address,
+    jar_id: &String,
+    splits: &Vec<Split>,
+) {
+    env.mock_auths(&[MockAuth {
+        address: signer,
+        invoke: &MockAuthInvoke {
+            contract,
+            fn_name: "update_splits",
+            args: (jar_id.clone(), splits.clone()).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+}
+
+/// Authority moves with the stored owner (#75): after a transfer, the new
+/// owner's signature alone is enough to call `update_splits`. A transfer that
+/// rewrote the field without moving authority would fail here.
+#[test]
+fn new_owner_can_update_splits_after_transfer() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let jar_id = String::from_str(env, "@handoff_new");
+    handed_off_jar(env, &client, &jar_id, &owner, &new_owner, &alice);
+
     let new_splits = vec![
         env,
         Split {
@@ -2530,32 +2687,52 @@ fn transfer_jar_ownership_moves_control_to_new_owner() {
             bps: 10000,
         },
     ];
-    env.mock_auths(&[MockAuth {
-        address: &new_owner,
-        invoke: &MockAuthInvoke {
-            contract: &s.contract,
-            fn_name: "update_splits",
-            args: (jar_id.clone(), new_splits.clone()).into_val(env),
-            sub_invokes: &[],
-        },
-    }]);
+    mock_update_splits_auth(env, &s.contract, &new_owner, &jar_id, &new_splits);
     client.update_splits(&jar_id, &new_splits);
-    assert_eq!(client.get_jar(&jar_id).splits.get(0).unwrap().to, bob);
 
-    // The old owner can no longer update splits.
-    env.mock_auths(&[MockAuth {
-        address: &owner,
-        invoke: &MockAuthInvoke {
-            contract: &s.contract,
-            fn_name: "update_splits",
-            args: (jar_id.clone(), new_splits.clone()).into_val(env),
-            sub_invokes: &[],
+    let splits = client.get_jar(&jar_id).splits;
+    assert_eq!(splits.len(), 1);
+    assert_eq!(splits.get(0).unwrap().to, bob);
+}
+
+/// The other half of #75: once the jar has moved, the previous owner's
+/// signature no longer authorizes `update_splits`, and the splits are left as
+/// they were. `new_owner_can_update_splits_after_transfer` is the positive
+/// control: the same builder with the right signer succeeds, so this failure
+/// is about who signed, not the shape of the mocked invocation.
+#[test]
+fn previous_owner_cannot_update_splits_after_transfer() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let new_owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let mallory = Address::generate(env);
+    let jar_id = String::from_str(env, "@handoff_old");
+    handed_off_jar(env, &client, &jar_id, &owner, &new_owner, &alice);
+
+    let hijack = vec![
+        env,
+        Split {
+            to: mallory.clone(),
+            bps: 10000,
         },
-    }]);
-    let res = client.try_update_splits(&jar_id, &new_splits);
+    ];
+    mock_update_splits_auth(env, &s.contract, &owner, &jar_id, &hijack);
+    let res = client.try_update_splits(&jar_id, &hijack);
     assert!(
         res.is_err(),
-        "the old owner must not be able to update splits after transferring ownership"
+        "the previous owner must not be able to update splits after transferring ownership"
+    );
+
+    let splits = client.get_jar(&jar_id).splits;
+    assert_eq!(splits.len(), 1);
+    assert_eq!(
+        splits.get(0).unwrap().to,
+        alice,
+        "a rejected update must leave the splits untouched"
     );
 }
 
@@ -3169,35 +3346,6 @@ fn set_min_tip_amount_sets_and_reads_minimum() {
 }
 
 #[test]
-fn get_min_accepted_tip_accounts_for_rounding_and_configured_minimum() {
-    let s = setup();
-    let env = &s.env;
-    let client = TipSplitterClient::new(env, &s.contract);
-    let owner = Address::generate(env);
-    let jar_id = String::from_str(env, "@smallest");
-    client.create_jar(
-        &owner,
-        &jar_id,
-        &vec![
-            env,
-            Split {
-                to: Address::generate(env),
-                bps: 7500,
-            },
-            Split {
-                to: Address::generate(env),
-                bps: 2500,
-            },
-        ],
-    );
-    // ceil(10_000 / 2_500) is 4; this is the first amount where both
-    // non-final shares are positive under integer division.
-    assert_eq!(client.get_min_accepted_tip(&jar_id), 4);
-    client.set_min_tip_amount(&jar_id, &Some(25));
-    assert_eq!(client.get_min_accepted_tip(&jar_id), 25);
-}
-
-#[test]
 fn set_min_tip_amount_emits_event() {
     let s = setup();
     let env = &s.env;
@@ -3378,11 +3526,6 @@ fn preview_split_enforces_minimum_tip_amount() {
     let s = setup();
     let env = &s.env;
     let client = TipSplitterClient::new(env, &s.contract);
-fn get_supporter_stats_is_zero_for_an_address_that_never_tipped() {
-    let s = setup();
-    let env = &s.env;
-    let client = TipSplitterClient::new(env, &s.contract);
-    let token_admin = token::StellarAssetClient::new(env, &s.token);
 
     let owner = Address::generate(env);
     let alice = Address::generate(env);
@@ -3433,17 +3576,40 @@ fn splits_strategy() -> impl Strategy<Value = std::vec::Vec<u32>> {
     (1u32..=MAX_RECIPIENTS).prop_flat_map(valid_bps_distribution)
 }
 
+/// Random splits plus, about half the time, the index of the one share the
+/// tipper themselves holds (#78). `None` means every recipient is a fresh
+/// address, as the property test originally assumed.
+fn splits_with_optional_tipper() -> impl Strategy<Value = (std::vec::Vec<u32>, Option<usize>)> {
+    splits_strategy().prop_flat_map(|bps| {
+        let n = bps.len();
+        (Just(bps), proptest::option::of(0..n))
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// The core invariant: however a tip is split, every recipient's payout
-    /// sums back to exactly the tipped amount, with no dust lost or created,
-    /// and the tipper's balance drops by exactly that amount. Covers amounts
-    /// smaller than the recipient count, where truncation bites hardest.
+    /// The core invariant, stated so it holds whether or not the tipper is
+    /// one of the recipients (#78):
+    ///
+    /// - every other recipient receives exactly their `preview_split` share,
+    ///   dust included;
+    /// - what leaves the tipper equals what those other recipients receive;
+    /// - the tipper keeps their own share, so the two amounts above plus that
+    ///   share add back to exactly the tipped amount.
+    ///
+    /// With no share for the tipper this is the original "payouts sum to the
+    /// tip and the tipper's balance drops by all of it". With a share, a
+    /// split that rolled the tipper's share into the last recipient would
+    /// overpay that recipient and fail here.
+    ///
+    /// `amount` starts at 10 000: a share of 1 bps needs at least that much to
+    /// avoid truncating to zero, which `tip` rejects with
+    /// `SplitAmountTooSmall` before any transfer.
     #[test]
     fn tip_distributes_full_amount_across_random_splits(
-        bps in splits_strategy(),
-        amount in 1i128..=1_000_000_000i128,
+        (bps, tipper_slot) in splits_with_optional_tipper(),
+        amount in 10_000i128..=1_000_000_000i128,
     ) {
         let s = setup();
         let env = &s.env;
@@ -3455,8 +3621,15 @@ proptest! {
         let tipper = Address::generate(env);
         token_admin.mint(&tipper, &amount);
 
-        let recipients: std::vec::Vec<Address> =
-            bps.iter().map(|_| Address::generate(env)).collect();
+        let recipients: std::vec::Vec<Address> = (0..bps.len())
+            .map(|i| {
+                if tipper_slot == Some(i) {
+                    tipper.clone()
+                } else {
+                    Address::generate(env)
+                }
+            })
+            .collect();
         let mut splits = vec![env];
         for (addr, b) in recipients.iter().zip(bps.iter()) {
             splits.push_back(Split {
@@ -3467,11 +3640,34 @@ proptest! {
 
         let jar_id = String::from_str(env, "@prop");
         client.create_jar(&owner, &jar_id, &splits);
-        client.tip(&tipper, &jar_id, &amount, &String::from_str(env, "prop"));
+        let shares = i128_vec_to_std(&client.preview_split(&jar_id, &amount));
+        let message = String::from_str(env, "prop");
+        if bps.len() == 1 && tipper_slot.is_some() {
+            // The tipper is the only recipient, so nothing would move (#93).
+            prop_assert_eq!(
+                client.try_tip(&tipper, &jar_id, &amount, &message),
+                Err(Ok(Error::NoFundsMoved.into()))
+            );
+            prop_assert_eq!(token.balance(&tipper), amount);
+            return Ok(());
+        }
+        client.tip(&tipper, &jar_id, &amount, &message);
 
-        let total: i128 = recipients.iter().map(|r| token.balance(r)).sum();
-        prop_assert_eq!(total, amount);
-        prop_assert_eq!(token.balance(&tipper), 0);
+        let mut others_received: i128 = 0;
+        let mut tipper_share: i128 = 0;
+        for (i, r) in recipients.iter().enumerate() {
+            if tipper_slot == Some(i) {
+                tipper_share = shares[i];
+            } else {
+                prop_assert_eq!(token.balance(r), shares[i]);
+                others_received += token.balance(r);
+            }
+        }
+        let left_tipper = amount - token.balance(&tipper);
+
+        prop_assert_eq!(left_tipper, others_received);
+        prop_assert_eq!(others_received + tipper_share, amount);
+        prop_assert_eq!(token.balance(&tipper), tipper_share);
     }
 }
 
@@ -3498,8 +3694,8 @@ fn raw_tip_breakdown(
         .collect();
     assert_eq!(events.len(), 1, "expected exactly one tip event");
     let (_, _, data) = events.first().unwrap();
-    let TipEvent { breakdown, .. } =
-        TryFromVal::try_from_val(env, data).expect("tip event data shape");
+    let decoded: TipEventData = TryFromVal::try_from_val(env, data).expect("tip event data shape");
+    let breakdown = decoded.breakdown;
     (0..breakdown.len())
         .map(|i| breakdown.get(i).unwrap())
         .collect()
@@ -4529,7 +4725,7 @@ fn version_matches_the_interface_constant() {
     assert_eq!(client.version(), INTERFACE_VERSION);
     assert_eq!(
         client.version(),
-        2,
+        3,
         "the published version is part of the public interface; bump \
          INTERFACE_VERSION when the shape changes, do not edit this test \
          to match a silent change"
@@ -4897,18 +5093,6 @@ fn tip_event_names_the_token_paid_in() {
         .filter(|e| e.0 == s.contract && e.1 == expected_topics)
         .collect();
     assert_eq!(ev.len(), 1);
-    let TipEvent {
-        from,
-        amount,
-        breakdown,
-        token: token_paid,
-        ..
-    } = TryFromVal::try_from_val(env, &ev.first().unwrap().2).expect("tip event data shape");
-    assert_eq!(token_paid, eurc, "the event must name the asset paid in");
-    assert_eq!(from, tipper);
-    assert_eq!(amount, 400);
-    assert_eq!(breakdown.len(), 1);
-    assert_eq!(breakdown.get(0).unwrap(), (recipient, 400, false));
     let decoded: TipEventData =
         TryFromVal::try_from_val(env, &ev.first().unwrap().2).expect("tip event data shape");
     assert_eq!(decoded.token, eurc, "the event must name the asset paid in");
@@ -5086,8 +5270,10 @@ fn collect_recurring_pays_the_first_due_period_like_a_tip() {
     assert_eq!(
         decoded,
         TipEvent {
+            version: 1,
             from: supporter.clone(),
             amount: 500i128,
+            fee: 0,
             message: String::from_str(env, "monthly"),
             breakdown: vec![
                 env,
@@ -5099,16 +5285,6 @@ fn collect_recurring_pays_the_first_due_period_like_a_tip() {
             reference: None,
         }
     );
-    assert_eq!(decoded.version, 1);
-    assert_eq!(decoded.from, supporter.clone());
-    assert_eq!(decoded.amount, 500i128);
-    assert_eq!(decoded.message, String::from_str(env, "monthly"));
-    assert_eq!(decoded.breakdown.len(), 2);
-    assert_eq!(decoded.breakdown.get(0).unwrap(), (alice.clone(), 350i128, false));
-    assert_eq!(decoded.breakdown.get(1).unwrap(), (bob.clone(), 150i128, false));
-    assert_eq!(decoded.token, s.token.clone());
-    assert_eq!(decoded.seq, 1u64);
-    assert_eq!(decoded.reference, None);
 
     assert_eq!(token.balance(&alice), 350);
     assert_eq!(token.balance(&bob), 150);
@@ -5573,9 +5749,9 @@ fn preview_tip_matches_the_tip_event_breakdown_when_sender_is_not_a_recipient() 
     );
 }
 
-/// A tipper who is also the *first* recipient pays out their own share to the
-/// others: the self-transfer is reported as 0 and rolls into the last
-/// recipient, and `preview_tip` must report that, not the raw split.
+/// A tipper who is also the *first* recipient keeps their own share: the
+/// self-transfer is reported as 0, every other recipient gets exactly their
+/// split, and `preview_tip` must report that, not the raw split (#78).
 #[test]
 fn preview_tip_matches_the_tip_event_breakdown_when_sender_is_a_recipient() {
     let s = setup();
@@ -5591,13 +5767,13 @@ fn preview_tip_matches_the_tip_event_breakdown_when_sender_is_a_recipient() {
     let jar_id = String::from_str(env, "@ptip_self");
     preview_tip_jar(env, &client, &jar_id, &alice, &bob, &carol);
 
-    // alice tips 1000: her own 500 is never transferred and rolls into carol,
-    // so the payout plan is [0, 300, 700] — not the [500, 300, 200] that
+    // alice tips 1000: her own 500 is never transferred and stays with her,
+    // so the payout plan is [0, 300, 200] — not the [500, 300, 200] that
     // preview_split would report.
     let plan = client.preview_tip(&jar_id, &alice, &1_000);
     assert_eq!(
         i128_vec_to_std(&plan),
-        std::vec::Vec::from([0_i128, 300_i128, 700_i128])
+        std::vec::Vec::from([0_i128, 300_i128, 200_i128])
     );
     assert_eq!(
         i128_vec_to_std(&client.preview_split(&jar_id, &1_000)),
@@ -5621,12 +5797,11 @@ fn preview_tip_matches_the_tip_event_breakdown_when_sender_is_a_recipient() {
     let token = token::Client::new(env, &s.token);
     assert_eq!(
         token.balance(&alice),
-        0,
-        "alice's own 500 rolled into the last recipient rather than staying with her: \
-         she paid the full 1000 out, 300 to bob and 700 to carol"
+        500,
+        "alice's own 500 stays with her: only bob's 300 and carol's 200 leave her"
     );
     assert_eq!(token.balance(&bob), 300);
-    assert_eq!(token.balance(&carol), 700);
+    assert_eq!(token.balance(&carol), 200);
 }
 
 /// The special case of the special case: a tipper who is the *last* recipient
@@ -5992,22 +6167,6 @@ fn create_jar_is_unchanged_when_no_registrar_is_set() {
 // `InvalidAmount` and leave every balance unchanged. The minimum is
 // `ceil(BPS_DENOM / min_bps)` for the generated splits — below that,
 // some recipient's share would truncate to zero.
-
-/// Generate valid split configurations: vectors of bps values that sum to BPS_DENOM.
-fn splits_strategy() -> impl Strategy<Value = std::vec::Vec<u32>> {
-    // Generate n-1 random values in range [1, 9998], then compute the last one
-    prop::collection::vec(1..9998u32, 1..4)
-        .prop_filter_map("sum must be < 10000", |mut v| {
-            let sum: u32 = v.iter().sum();
-            if sum < 10000 && (10000 - sum) > 0 {
-                v.push(10000 - sum);
-                Some(v)
-            } else {
-                None
-            }
-        })
-}
-
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -6624,6 +6783,12 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::SplitAmountTooSmall, 27),
         (Error::AmountOverflow, 28),
         (Error::InvalidMinimumAmount, 29),
+        (Error::NoFundsMoved, 30),
+        (Error::InvalidRecipient, 31),
+        (Error::AdminExists, 32),
+        (Error::ContractPaused, 33),
+        (Error::JarIdInUse, 34),
+        (Error::FeeTooHigh, 35),
     ];
 
     for (variant, expected) in codes {
@@ -7332,6 +7497,394 @@ fn tip_stale_authorization_is_rejected_after_ownership_and_splits_change() {
     assert_eq!(token.balance(&bob), 0);
 }
 
+#[test]
+fn jar_exists_rejects_slugs_create_jar_would_reject() {
+    let s = setup();
+    let client = TipSplitterClient::new(&s.env, &s.contract);
+    assert!(!client.jar_exists(&String::from_str(&s.env, "")));
+    assert!(!client.jar_exists(&String::from_str(&s.env, &"x".repeat(65))));
+}
+
+#[test]
+fn get_min_accepted_tip_accounts_for_rounding_and_configured_minimum() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let owner = Address::generate(env);
+    let jar_id = String::from_str(env, "@smallest");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: 7500,
+            },
+            Split {
+                to: Address::generate(env),
+                bps: 2500,
+            },
+        ],
+    );
+    // ceil(10_000 / 2_500) is 4; this is the first amount where both
+    // non-final shares are positive under integer division.
+    assert_eq!(client.get_min_accepted_tip(&jar_id), 4);
+    client.set_min_tip_amount(&jar_id, &Some(25));
+    assert_eq!(client.get_min_accepted_tip(&jar_id), 25);
+}
+
+// ===========================================================================
+// #79 protocol fee
+// ===========================================================================
+
+/// A 70/30 jar between two fresh recipients, with `tipper` funded by `mint`.
+fn fee_jar(s: &Setup, jar_id: &str, mint: i128) -> (String, Address, Address, Address) {
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &mint);
+
+    let jar_id = String::from_str(env, jar_id);
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 7000,
+            },
+            Split {
+                to: bob.clone(),
+                bps: 3000,
+            },
+        ],
+    );
+    (jar_id, alice, bob, tipper)
+}
+
+/// No deployment starts charging on upgrade: the fee is 0 until the admin
+/// sets one, and a tip then pays the recipients the whole amount.
+#[test]
+fn fee_defaults_to_zero_and_takes_nothing() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let (jar_id, alice, bob, tipper) = fee_jar(&s, "@fee_default", 10_000);
+
+    assert_eq!(client.get_fee_bps(), 0);
+    client.tip(&tipper, &jar_id, &10_000, &String::from_str(env, "free"));
+
+    assert_eq!(token.balance(&alice), 7_000);
+    assert_eq!(token.balance(&bob), 3_000);
+    assert_eq!(token.balance(&s.admin), 0);
+}
+
+/// `set_fee_bps` stores the value `get_fee_bps` reports, accepts the 500 bps
+/// cap itself, and rejects anything above it with `FeeTooHigh`, leaving the
+/// stored fee unchanged.
+#[test]
+fn set_fee_bps_is_capped_at_five_percent() {
+    let s = setup();
+    let client = TipSplitterClient::new(&s.env, &s.contract);
+
+    client.set_fee_bps(&100);
+    assert_eq!(client.get_fee_bps(), 100);
+
+    client.set_fee_bps(&MAX_FEE_BPS);
+    assert_eq!(client.get_fee_bps(), 500);
+
+    assert_eq!(
+        client.try_set_fee_bps(&501),
+        Err(Ok(Error::FeeTooHigh.into()))
+    );
+    assert_eq!(
+        client.get_fee_bps(),
+        500,
+        "a rejected fee must not be stored"
+    );
+
+    client.set_fee_bps(&0);
+    assert_eq!(client.get_fee_bps(), 0, "0 turns the fee off again");
+}
+
+/// Only the admin may set the fee. Paired with a positive control using the
+/// same builder and the admin as signer.
+#[test]
+fn set_fee_bps_requires_admin_auth() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let stranger = Address::generate(env);
+
+    let mock_signer = |signer: &Address| {
+        env.mock_auths(&[MockAuth {
+            address: signer,
+            invoke: &MockAuthInvoke {
+                contract: &s.contract,
+                fn_name: "set_fee_bps",
+                args: (100u32,).into_val(env),
+                sub_invokes: &[],
+            },
+        }]);
+    };
+
+    mock_signer(&stranger);
+    assert!(
+        client.try_set_fee_bps(&100).is_err(),
+        "a non-admin must not be able to set the protocol fee"
+    );
+    assert_eq!(client.get_fee_bps(), 0);
+
+    mock_signer(&s.admin);
+    client.set_fee_bps(&100);
+    assert_eq!(client.get_fee_bps(), 100);
+}
+
+/// `set_fee_bps` publishes `fee_set` with the admin as topic and the new
+/// value as data, so a client can track the fee from the event log.
+#[test]
+fn set_fee_bps_emits_fee_set_event() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    client.set_fee_bps(&100);
+
+    let expected_topics = vec![
+        env,
+        symbol_short!("fee_set").into_val(env),
+        s.admin.into_val(env),
+    ];
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == s.contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1);
+    let fee: u32 = TryFromVal::try_from_val(env, &events[0].2).unwrap();
+    assert_eq!(fee, 100);
+}
+
+/// The configured 1%: the fee comes off the top and goes to the admin, the
+/// recipients split what is left, and the recipients' total plus the fee is
+/// the tip exactly. The `tip` event reports the fee next to the breakdown.
+#[test]
+fn tip_takes_the_fee_before_the_split() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let (jar_id, alice, bob, tipper) = fee_jar(&s, "@fee_one_pct", 10_000);
+
+    client.set_fee_bps(&100);
+    // Previews already report post-fee shares, so the fee a client shows is
+    // the tip minus their sum.
+    let preview = i128_vec_to_std(&client.preview_split(&jar_id, &10_000));
+    assert_eq!(preview, std::vec![6_930, 2_970]);
+    assert_eq!(10_000 - preview.iter().sum::<i128>(), 100);
+
+    client.tip(&tipper, &jar_id, &10_000, &String::from_str(env, "1%"));
+    let decoded = last_tip_event(env, &s.contract, &jar_id);
+
+    // 1% of 10 000 is 100; 9 900 splits 70/30.
+    assert_eq!(token.balance(&s.admin), 100);
+    assert_eq!(token.balance(&alice), 6_930);
+    assert_eq!(token.balance(&bob), 2_970);
+    assert_eq!(token.balance(&tipper), 0);
+    assert_eq!(
+        token.balance(&alice) + token.balance(&bob) + token.balance(&s.admin),
+        10_000,
+        "recipients plus fee must equal the tip exactly"
+    );
+
+    assert_eq!(decoded.amount, 10_000);
+    assert_eq!(decoded.fee, 100);
+    assert_eq!(
+        decoded.breakdown,
+        vec![env, (alice, 6_930i128, false), (bob, 2_970i128, false)]
+    );
+}
+
+/// The fee truncates and the last recipient absorbs the split's own dust, so
+/// an awkward amount still balances to the unit.
+#[test]
+fn fee_and_dust_rounding_still_account_for_every_unit() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let (jar_id, alice, bob, tipper) = fee_jar(&s, "@fee_dust", 10_099);
+
+    client.set_fee_bps(&100);
+    client.tip(&tipper, &jar_id, &10_099, &String::from_str(env, "odd"));
+
+    // fee = floor(10 099 * 100 / 10 000) = 100; net = 9 999;
+    // alice = floor(9 999 * 0.7) = 6 999; bob takes the remaining 3 000.
+    assert_eq!(token.balance(&s.admin), 100);
+    assert_eq!(token.balance(&alice), 6_999);
+    assert_eq!(token.balance(&bob), 3_000);
+    assert_eq!(token.balance(&tipper), 0);
+}
+
+/// The too-small-to-split guard applies to the post-fee amount: a tip whose
+/// gross clears it but whose net does not is rejected, and
+/// `get_min_accepted_tip` reports the first gross amount that works.
+#[test]
+fn split_guard_and_min_accepted_tip_apply_after_the_fee() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+    let jar_id = String::from_str(env, "@fee_guard");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: Address::generate(env),
+                bps: 100,
+            },
+            Split {
+                to: Address::generate(env),
+                bps: 9_900,
+            },
+        ],
+    );
+    // A 1% share needs a net of at least 100.
+    assert_eq!(client.get_min_accepted_tip(&jar_id), 100);
+
+    client.set_fee_bps(&MAX_FEE_BPS);
+    // 104 - floor(104 * 5%) = 99, which truncates the 1% share to zero;
+    // 105 - floor(105 * 5%) = 100, the first gross amount that pays everyone.
+    assert_eq!(client.get_min_accepted_tip(&jar_id), 105);
+    let msg = String::from_str(env, "edge");
+    assert_eq!(
+        client.try_tip(&tipper, &jar_id, &104, &msg),
+        Err(Ok(Error::SplitAmountTooSmall.into()))
+    );
+    assert_eq!(
+        client.try_preview_split(&jar_id, &104),
+        Err(Ok(Error::SplitAmountTooSmall.into()))
+    );
+    assert!(client.try_tip(&tipper, &jar_id, &105, &msg).is_ok());
+}
+
+/// The fee rule follows the self-transfer rule: an admin tipping keeps the
+/// fee rather than paying themselves, and the event reports a fee of 0
+/// because nothing moved.
+#[test]
+fn admin_tipping_keeps_the_fee() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+    let (jar_id, alice, bob, _) = fee_jar(&s, "@fee_admin", 0);
+    token_admin.mint(&s.admin, &10_000);
+
+    client.set_fee_bps(&100);
+    client.tip(&s.admin, &jar_id, &10_000, &String::from_str(env, "mine"));
+    let decoded = last_tip_event(env, &s.contract, &jar_id);
+
+    assert_eq!(token.balance(&alice), 6_930);
+    assert_eq!(token.balance(&bob), 2_970);
+    assert_eq!(token.balance(&s.admin), 100);
+    assert_eq!(decoded.fee, 0);
+}
+
+/// A collected recurring tip pays the same fee as a manual tip of the same
+/// amount, drawn from the same allowance.
+#[test]
+fn collect_recurring_takes_the_fee() {
+    let s = setup();
+    let env = &s.env;
+    let (client, alice, bob, supporter, _jar_id, id) = recurring_fixture(env, &s, 1_000, 1_000);
+    let token = token::Client::new(env, &s.token);
+    client.set_fee_bps(&100);
+    let due = client.get_recurring(&id).next_due_ledger;
+    env.ledger().set_sequence_number(due);
+
+    let before = token.balance(&supporter);
+    client.collect_recurring(&id);
+
+    // 1% of 1 000 is 10; 990 splits 70/30 into 693 and 297.
+    assert_eq!(token.balance(&s.admin), 10);
+    assert_eq!(token.balance(&alice), 693);
+    assert_eq!(token.balance(&bob), 297);
+    assert_eq!(before - token.balance(&supporter), 1_000);
+}
+
+/// Decodes the single `tip` event the most recent call published for `jar_id`.
+fn last_tip_event(env: &Env, contract: &Address, jar_id: &String) -> TipEvent {
+    let expected_topics = vec![
+        env,
+        symbol_short!("tip").into_val(env),
+        jar_id.into_val(env),
+    ];
+    let events: std::vec::Vec<_> = env
+        .events()
+        .all()
+        .iter()
+        .filter(|e| e.0 == *contract && e.1 == expected_topics)
+        .collect();
+    assert_eq!(events.len(), 1, "expected exactly one tip event");
+    TryFromVal::try_from_val(env, &events[0].2).expect("tip event data shape")
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// For any fee up to the cap and any valid split, the recipients' total
+    /// plus the fee equals the tip exactly, and the fee is the truncated
+    /// `amount * fee_bps / 10 000` (#79).
+    #[test]
+    fn fee_plus_payouts_equal_the_tip(
+        bps in splits_strategy(),
+        fee_bps in 0u32..=MAX_FEE_BPS,
+        amount in 20_000i128..=1_000_000_000i128,
+    ) {
+        let s = setup();
+        let env = &s.env;
+        let client = TipSplitterClient::new(env, &s.contract);
+        let token = token::Client::new(env, &s.token);
+        let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+        let owner = Address::generate(env);
+        let tipper = Address::generate(env);
+        token_admin.mint(&tipper, &amount);
+        let recipients: std::vec::Vec<Address> =
+            bps.iter().map(|_| Address::generate(env)).collect();
+        let mut splits = vec![env];
+        for (addr, b) in recipients.iter().zip(bps.iter()) {
+            splits.push_back(Split { to: addr.clone(), bps: *b });
+        }
+        let jar_id = String::from_str(env, "@prop_fee");
+        client.create_jar(&owner, &jar_id, &splits);
+        client.set_fee_bps(&fee_bps);
+        client.tip(&tipper, &jar_id, &amount, &String::from_str(env, "prop"));
+
+        let paid: i128 = recipients.iter().map(|r| token.balance(r)).sum();
+        let fee = token.balance(&s.admin);
+        prop_assert_eq!(fee, amount * fee_bps as i128 / 10_000);
+        prop_assert_eq!(paid + fee, amount);
+        prop_assert_eq!(token.balance(&tipper), 0);
+    }
+}
+
 /// Remaining time to live of a jar's persistent entry, read from inside the
 /// contract so the test sees exactly what the host will archive on.
 fn jar_ttl(env: &Env, contract: &Address, jar_id: &String) -> u32 {
@@ -7564,8 +8117,9 @@ fn tip_rejects_amount_too_small_for_the_smallest_share() {
     assert_eq!(token.balance(&tiny), 1);
     assert_eq!(token.balance(&rest), 9_999);
     assert_eq!(token.balance(&tipper), 10_000);
-// ── #102: Admin-gated contract upgrade ───────────────────────────────────────
+}
 
+// ── #102: Admin-gated contract upgrade ───────────────────────────────────────
 
 #[test]
 fn admin_can_upgrade_contract() {
@@ -7580,8 +8134,14 @@ fn admin_can_upgrade_contract() {
     let jar_id = String::from_str(env, "@upgrade");
     let splits = vec![
         env,
-        Split { to: alice.clone(), bps: 7000 },
-        Split { to: bob.clone(), bps: 3000 },
+        Split {
+            to: alice.clone(),
+            bps: 7000,
+        },
+        Split {
+            to: bob.clone(),
+            bps: 3000,
+        },
     ];
     client.create_jar(&owner, &jar_id, &splits);
 
@@ -7594,7 +8154,7 @@ fn admin_can_upgrade_contract() {
     // to the network, which isn't possible in the test environment.
     // The upgrade function will work in production when called with a
     // valid WASM hash that was uploaded via `soroban contract upload`.
-    
+
     // We verify the function exists and accepts the right parameters
     // by checking it compiles. The actual WASM swap is tested manually
     // on testnet after deployment.

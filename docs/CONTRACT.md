@@ -75,6 +75,8 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_tip_hook() -> Option<Address>` | — | The registered hook, or `None` when tips settle without one. |
 | `set_registrar(registrar)` | contract `admin` | Register or clear (`None`) the registrar whose co-signature `create_jar` requires (#178). Emits a `reg_set` event carrying the admin. See [the registrar gate](#the-jar-registrar-and-its-trust-model-178). |
 | `get_registrar() -> Option<Address>` | — | The registrar `create_jar` currently requires, or `None` when jar creation is permissionless. |
+| `set_fee_bps(fee_bps)` | contract `admin` | Set the protocol fee taken from every tip before the split, in basis points (#79). Defaults to `0`; above `500` (5%) is rejected with `FeeTooHigh`. The fee is paid to the admin. Emits a `fee_set` event. See [the protocol fee](#the-protocol-fee-79). |
+| `get_fee_bps() -> u32` | — | The protocol fee currently taken from every tip, in basis points. `0` until the admin sets one. |
 | `tip(from, jar_id, amount, message) -> u64` | `from` | Transfer `amount` USDC from `from`, split across the jar's recipients. Emits a `tip` event carrying the per-recipient breakdown and this tip's sequence number, and returns that number. Rejects amounts below the jar's minimum with `BelowMinTipAmount`. |
 | `tip_with_ref(from, jar_id, amount, message, reference) -> u64` | `from` | Identical to `tip`, plus an optional 32-byte opaque `reference` echoed in the `tip` event. Same transfers, same validation, same counter — both entry points call one internal implementation. |
 | `get_tip_count() -> u64` | — | How many tips the contract has taken, i.e. the number the next tip will receive. `0` on a fresh deploy. |
@@ -82,7 +84,7 @@ one belongs to a jar, the other to a `(jar, supporter)` pair.
 | `get_jar_owner(jar_id) -> Address` | — | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
 | `get_split_count(jar_id) -> u32` | — | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
 | `preview_split(jar_id, amount) -> Vec<i128>` | — | What each recipient would receive from a tip of `amount`, in split order. Rejects amounts below the jar's minimum with `BelowMinTipAmount` as well as the amounts `tip` rejects; panics with `JarNotFound` if the slug is free. |
-| `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | What each recipient would **actually** receive from a `tip` of `amount` sent by `from` (#177), in split order: the sender-aware sibling of `preview_split`. A recipient who is the sender is reported as `0`, exactly as the `tip` event's breakdown records them, because their share rolls into the last recipient. Computed by the same private helper the tip payout loop uses, so preview and payout cannot drift. Rejects what `tip` rejects. |
+| `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | What each recipient would **actually** receive from a `tip` of `amount` sent by `from` (#177), in split order: the sender-aware sibling of `preview_split`. A recipient who is the sender is reported as `0`, exactly as the `tip` event's breakdown records them, because their share is never transferred and stays with them. Computed by the same private helper the tip payout loop uses, so preview and payout cannot drift. Rejects what `tip` rejects. |
 | `jar_exists(jar_id) -> bool` | — | Whether the slug is already registered. |
 | `is_recipient(jar_id, address) -> bool` | — | Whether `address` appears in the jar's splits. Panics with `JarNotFound` if the slug is free. |
 | `get_min_tip_amount(jar_id) -> Option<i128>` | — | Read a jar's optional minimum tip amount. Returns `None` if no minimum is set. Panics with `JarNotFound` if the slug is free. |
@@ -246,7 +248,8 @@ Alice's share truncates from 70.7 to 70 and Bob absorbs the leftover 1 on top
 of his 30 — the dust goes to the **last** recipient, so a UI that rounds evenly
 would show Bob the wrong number.
 
-The shares always sum to exactly `amount`. That holds for awkward amounts too:
+The shares always sum to exactly `amount` minus the
+[protocol fee](#the-protocol-fee-79) — `amount` itself while no fee is set. That holds for awkward amounts too:
 a 3333 / 3333 / 3334 jar previewing `100` returns `[33, 33, 34]`, not `[33, 33,
 33]` with a unit lost.
 
@@ -261,8 +264,8 @@ at all describes a tip that can go through:
   would read as a jar that pays nobody.
 
 One caveat: `tip` withholds a recipient's share when that recipient is also the
-tipper — rather than making them pay themselves — and rolls the withheld share
-into the **last** recipient. `preview_split` does not take a `from` address, so
+tipper — rather than making them pay themselves — and the share simply stays
+with them. `preview_split` does not take a `from` address, so
 it reports every recipient's full share and disagrees with the actual payout
 for a tipper who is on the jar. Do not redo that arithmetic client-side: call
 [`preview_tip`](#previewing-a-tip-for-a-known-sender) instead, which takes the
@@ -274,20 +277,22 @@ sender and matches the payout exactly.
 `preview_split` but *for a specific tipper* (#177). It returns what `tip` will
 actually transfer to each recipient, in split order: a recipient who is the
 sender is reported as `0` — the same number the `tip` event's breakdown records
-for them — and their notional share rolls into the last recipient, as the tip
-does it.
+for them — and their share stays with them; every other recipient gets exactly
+their `preview_split` entry (#78).
 
 ```
 splits:  alice 50%, bob 30%, carol 20%
 preview_split(jar_id, 1000)          -> [500, 300, 200]
-preview_tip(jar_id, alice, 1000)     -> [0, 300, 700]
+preview_tip(jar_id, alice, 1000)     -> [0, 300, 200]   # alice keeps her 500
 preview_tip(jar_id, stranger, 1000)  -> [500, 300, 200]
 ```
 
 The numbers come from the **same private helper** (`payout_amounts`) that
 `tip`'s transfer loop consumes, so the view and the payout are one
-implementation and cannot drift apart — whatever rule change #66 eventually
-makes about the tipper's share, both follow it together. Validation mirrors
+implementation and cannot drift apart. Earlier builds rolled the tipper's
+withheld share into the last recipient, so a tipper on the jar paid their own
+share to someone else; #78 fixed that, and both the view and the payout
+changed together. Validation mirrors
 `tip` (same errors, same precedence); like `preview_split` it reads no
 balance, so it never says whether `from` can pay, and a share that ends up
 escrowed as `held` at transfer time (#171) is still reported, because that
@@ -442,8 +447,9 @@ Consequences a client has to design for:
   commit to), re-sign, and submit; a wallet that only retries the same
   envelope will fail identically forever.
 - A tipper who is also a recipient is not paid, so no transfer appears for them
-  in the tree, and their notional share rolls into the last recipient's
-  transfer. See [`breakdown`](#tip--published-on-every-successful-tip).
+  in the tree, and their share stays with them. With a
+  [protocol fee](#the-protocol-fee-79) set, the tree also holds one transfer of
+  the fee to the admin. See [`breakdown`](#tip--published-on-every-successful-tip).
 
 ### Owner-only functions
 
@@ -495,6 +501,17 @@ slug names at submission time.
 | 22 | `InsufficientBalance` | Tip amount exceeds the sender's token balance. Checked once per `tip` and once per `collect_recurring`, before any transfer. |
 | 23 | `NotDue` | `collect_recurring` was called before the schedule's `next_due_ledger`. A typed no-op: the entry is untouched and the same call succeeds once the ledger is reached. |
 | 24 | `InsufficientAllowance` | `collect_recurring` found the supporter's allowance for this contract below the scheduled amount. An expired allowance reads as zero and fails the same check. Raised before any transfer, so nothing moves. |
+| 25 | `AmountZero` | The tip (or preview, or recurring) amount is zero. |
+| 26 | `AmountNegative` | The tip (or preview, or recurring) amount is negative. |
+| 27 | `SplitAmountTooSmall` | The amount — after the protocol fee, when one is set — is small enough that some recipient's share would truncate to zero (`net * bps < 10_000`). `get_min_accepted_tip` reports the smallest amount that clears it. |
+| 28 | `AmountOverflow` | `amount * bps` (or `amount * fee_bps`) would overflow `i128`. |
+| 29 | `InvalidMinimumAmount` | `set_min_tip_amount` was given a minimum that is zero or negative. |
+| 30 | `NoFundsMoved` | A tip where every share was skipped (every recipient is the tipper) would move no funds. |
+| 31 | `InvalidRecipient` | A split recipient or jar owner is the contract itself or its token. |
+| 32 | `AdminExists` | `transfer_admin` was called with the current admin's address. |
+| 33 | `ContractPaused` | A tip was attempted while the contract is paused. |
+| 34 | `JarIdInUse` | `rename_jar` was given a jar id that is already in use. |
+| 35 | `FeeTooHigh` | `set_fee_bps` was given a fee above `500` bps (5%). The stored fee is unchanged. |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -605,7 +622,7 @@ Lets indexers track the current minimum tip floor for a jar without polling `get
 ### `tip` — published on every successful tip
 
 - **Topics:** `(symbol "tip", jar_id: String)`
-- **Data:** `TipEvent { from, amount, message, breakdown, token, seq, reference }`
+- **Data:** `TipEvent { from, amount, fee, message, breakdown, token, seq, reference }`
 
   Published by `tip`, `tip_with_ref`, `tip_in_token`, and — with the supporter
   as `from` and an explicit `None` reference — `collect_recurring` (#175), all
@@ -621,9 +638,11 @@ per-collaborator earnings never has to fetch the jar and redo the arithmetic.
 That matters because a recomputed figure can disagree with the contract's —
 the jar's splits may have been changed by `update_splits` between the tip and
 the read, and the last recipient's share includes rounding dust that depends
-on the exact amount. The `moved` values sum to at most `amount`: a recipient
-who is also the sender is reported with `moved = 0`, and their notional share
-rolls into the last recipient instead of transferring at all (see below).
+on the exact amount. `amount` is the gross tip and `fee` is the
+[protocol fee](#the-protocol-fee-79) this tip moved to the admin (`0` while no
+fee is set). `fee` plus the `moved` values equals `amount`, except that a
+recipient who is also the sender is reported with `moved = 0` and keeps their
+share (see below).
 
 All fields are named in the event map. Every settle path publishes the same
 fields — an absent reference is an explicit `None` — so consumers can decode
@@ -639,9 +658,8 @@ The triples report **what each transfer actually moved**, not the notional
 two differ in one case: `tip` skips paying a recipient who is also the sender,
 so that entry reports `0` where the preview would have shown their full share. The recipient is
 still listed, which lets a consumer tell "listed but paid nothing this tip"
-apart from "not in this jar". Because the skipped share is never deducted from
-the running total, the final recipient absorbs it — so a self-tip shows up as a
-`0` entry and a correspondingly larger one at the end.
+apart from "not in this jar". The skipped share stays with the tipper; no
+other entry grows to absorb it (#78).
 
 `breakdown.len()` equals the jar's split count at the moment of the tip, so it
 is at most `MAX_RECIPIENTS` (20) entries — see
@@ -1000,6 +1018,51 @@ the gate never does is touch existing jars: the registrar can only gate
 creations of *free* slugs; owners, splits and funds of registered jars remain
 exactly as unreachable to it as they were before.
 
+## The protocol fee (#79)
+
+```rust
+set_fee_bps(fee_bps: u32)   // admin only; 0..=500
+get_fee_bps() -> u32        // 0 until set
+```
+
+Every tip used to go entirely to the jar's recipients, and the contract had no
+way to fund the platform running it. A fee taken on-chain is more honest than
+one taken off-chain: a tipper can read it before signing.
+
+- **Default 0.** No deployment starts charging on upgrade; the admin opts in.
+  The intended configured value is **100 bps (1%)** — Buy Me a Coffee takes 5%
+  and Patreon 8–12%, and 1% keeps cross-border micro-tipping viable. Set it
+  with `FEE_BPS=100 ./scripts/set-fee.sh`.
+- **Capped at 500 bps (5%).** Anything higher is rejected with `FeeTooHigh`, so
+  the fee can never be set to swallow a tip.
+- **Taken before the split.** `fee = floor(amount * fee_bps / 10_000)` goes to
+  the contract admin and `net = amount - fee` is split across the recipients.
+  The too-small-to-split guard (`SplitAmountTooSmall`) and the rule that the
+  last recipient absorbs rounding dust both apply to `net`, so the recipients'
+  total plus the fee equals the tip exactly.
+
+```
+fee_bps = 100, splits alice 70%, bob 30%
+tip 10 000  -> fee 100, alice 6 930, bob 2 970
+tip 10 099  -> fee 100, alice 6 999, bob 3 000   (fee truncates; bob takes the dust)
+```
+
+Every preview (`preview_split`, `preview_split_details`, `preview_tip`) reports
+post-fee shares, so a client shows the fee as `amount - sum(preview_split)`
+without redoing the arithmetic. `get_min_accepted_tip` reports the smallest
+*gross* amount whose net still pays every recipient.
+
+The fee applies to `tip`, `tip_with_ref`, `tip_in_token` (in the token tipped),
+and `collect_recurring` (drawn from the same allowance, which must still cover
+`amount`). Stats and the post-tip hook record the gross `amount`. Two edge
+cases follow the self-transfer rule: an admin tipping keeps the fee rather than
+paying themselves, and the event then reports `fee = 0` because nothing moved.
+A fee transfer the admin cannot receive reverts the tip; the admin can set the
+fee to `0` to restore tipping.
+
+`set_fee_bps` emits a `fee_set` event: topics `(symbol "fee_set", admin)`, data
+the new `fee_bps: u32`.
+
 ## Detecting the interface version
 
 ```rust
@@ -1022,7 +1085,12 @@ changes. Do not bump it for an internal refactor, a new storage key, or a doc
 edit — none of those are visible to a consumer, and a version that changes when
 nothing observable did is a version consumers stop trusting.
 
-This build ships `version() == 2`. Version 1 covered the escrow/`held`
+This build ships `version() == 3`. Version 3 adds `set_fee_bps` /
+`get_fee_bps`, the `fee_set` event, the `FeeTooHigh` error (35), and the `fee`
+field in the `tip` event (#79); it also changes what a tipper who is a
+recipient pays (#78), which `preview_tip` already reports.
+
+Version 2 Version 1 covered the escrow/`held`
 breakdown, the token allowlist, the totals views, and the sequence-numbered
 `tip` event. This PR adds four functions and one view beyond that point —
 `collect_recurring`, `preview_tip`, `set_tip_hook`/`get_tip_hook`,
@@ -1228,14 +1296,14 @@ covered. A contract tipping from its own balance must pre-authorize each
 transfer with `env.authorize_as_current_contract`, listing every recipient and
 the exact amount, or the tip fails with an auth error.
 
-The amounts to authorize are what `preview_split(jar_id, amount)` returns, with
-one exception: if the calling contract is itself a recipient, `tip` skips the
-self-transfer and rolls that share into the last recipient, so authorize
-`preview_split`'s values **minus** the contract's own entry, plus the same
-amount on the final recipient.
+The amounts to authorize are what `preview_tip(jar_id, caller, amount)`
+returns, skipping any `0` entry — a calling contract that is itself a recipient
+makes no transfer to itself and keeps its share. When a
+[protocol fee](#the-protocol-fee-79) is set, also authorize one transfer of the
+fee to `get_admin()`: the fee is `amount - sum(preview_split(jar_id, amount))`.
 
 `examples/tip-forwarder` is a worked example of exactly this — one function
 that tips a jar from the contract's own balance — with tests that run it
 against the real `TipSplitter` and a test SAC, including the failure mode where
-the authorized amounts do not match the jar's splits. See its
+the fee transfer is not authorized. See its
 [`README.md`](../examples/tip-forwarder/README.md).
