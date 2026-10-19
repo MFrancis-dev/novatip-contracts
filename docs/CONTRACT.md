@@ -125,7 +125,7 @@ written as raised only when every earlier check has passed.
 | `get_jar(jar_id) -> Jar` | — | `JarNotFound` | Read a jar's configuration. Panics with `JarNotFound` if the slug is free. |
 | `get_jar_owner(jar_id) -> Address` | — | `JarNotFound` | Read just a jar's owner. Panics with `JarNotFound` if the slug is free. |
 | `get_split_count(jar_id) -> u32` | — | `JarNotFound` | How many recipients a jar pays. Panics with `JarNotFound` if the slug is free. |
-| `preview_split(jar_id, amount) -> Vec<i128>` | — | `JarNotFound` → `BelowMinTipAmount` → `InvalidAmount` | What each recipient would receive from a tip of `amount`, in split order. Rejects amounts below the jar's minimum with `BelowMinTipAmount` as well as the amounts `tip` rejects; panics with `JarNotFound` if the slug is free. |
+| `preview_split(jar_id, amount) -> Vec<i128>` | — | `AmountZero` / `AmountNegative` → `JarNotFound` → `BelowMinTipAmount` → `SplitAmountTooSmall` / `AmountOverflow` | What each recipient would receive from a tip of `amount`, in split order. Rejects amounts below the jar's minimum with `BelowMinTipAmount` as well as the amounts `tip` rejects, in the same order; panics with `JarNotFound` if the slug is free. |
 | `preview_tip(jar_id, from, amount) -> Vec<i128>` | — | `InvalidAmount` (amount ≤ 0) → `JarNotFound` → `BelowMinTipAmount` → `InvalidAmount` (a share truncates to zero, or `amount * bps` overflows) | The sender-aware preview (#177): exactly the amounts `tip` will transfer for `from`, helper-shared with the payout. |
 | `collect_recurring(id)` | — | `RecurringNotFound` → `NotDue` → `JarNotFound` → `NotInitialized` → `InsufficientAllowance` → `InsufficientBalance` | Collect one due period of a recurring schedule through the supporter's token allowance (#175). Publishes the same `tip` event and fires the post-tip hook. |
 | `jar_exists(jar_id) -> bool` | — | — | Whether the slug is already registered. Reads one key and returns a plain `bool`; never panics on a free slug. |
@@ -271,12 +271,17 @@ a 3333 / 3333 / 3334 jar previewing `100` returns `[33, 33, 34]`, not `[33, 33,
 `preview_split` rejects exactly what `tip` rejects, so a preview that returns
 at all describes a tip that can go through:
 
-- `amount <= 0` — `InvalidAmount`.
+- `amount == 0` — `AmountZero`, checked before the jar lookup and the minimum.
+- `amount < 0` — `AmountNegative`, at the same point.
 - an `amount` small enough that some recipient's share would truncate to zero
-  (`amount * bps < 10_000`) — `InvalidAmount`.
-- an `amount` so large that `amount * bps` overflows `i128` — `InvalidAmount`.
+  (`amount * bps < 10_000`) — `SplitAmountTooSmall`.
+- an `amount` so large that `amount * bps` overflows `i128` — `AmountOverflow`.
 - an unregistered slug — `JarNotFound`, rather than an empty vector, which
   would read as a jar that pays nobody.
+- an `amount` below the jar's configured minimum — `BelowMinTipAmount`.
+
+The sign checks come first, exactly as in `tip`, so the same amount gets the
+same code from both calls even on a jar with a minimum (#97).
 
 One caveat: `tip` withholds a recipient's share when that recipient is also the
 tipper — rather than making them pay themselves — and the share simply stays

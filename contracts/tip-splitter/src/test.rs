@@ -3657,6 +3657,97 @@ fn preview_split_enforces_minimum_tip_amount() {
     assert!(res_exact.is_ok());
 }
 
+/// #97: `preview_split` must apply the amount-sign check before the jar's
+/// minimum, exactly as `tip` does, so a client previewing then tipping gets
+/// one consistent error instead of "below the minimum" from one and "enter a
+/// positive amount" from the other.
+#[test]
+fn preview_split_and_tip_agree_on_error_order() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    let jar_id = String::from_str(env, "@previeword");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+    client.set_min_tip_amount(&jar_id, &Some(100_i128));
+    let message = String::from_str(env, "");
+
+    for (amount, expected) in [
+        (0_i128, Error::AmountZero),
+        (-5_i128, Error::AmountNegative),
+    ] {
+        let preview = client.try_preview_split(&jar_id, &amount).unwrap_err();
+        let tip = client
+            .try_tip(&tipper, &jar_id, &amount, &message)
+            .unwrap_err();
+        assert_eq!(
+            preview,
+            Ok(expected.into()),
+            "a non-positive amount is a sign error even when a minimum is set"
+        );
+        assert_eq!(
+            preview, tip,
+            "preview_split and tip must report the same error for {amount}"
+        );
+    }
+
+    // Between 1 and the minimum, both still report the minimum rather than a
+    // sign error: the order change must not swallow the minimum check.
+    let preview = client.try_preview_split(&jar_id, &99_i128).unwrap_err();
+    let tip = client
+        .try_tip(&tipper, &jar_id, &99_i128, &message)
+        .unwrap_err();
+    assert_eq!(preview, Ok(Error::BelowMinTipAmount.into()));
+    assert_eq!(preview, tip);
+}
+
+/// The sign check is unconditional: it applies to a jar with no minimum too,
+/// where `preview_split` previously reached `compute_shares` and reported the
+/// same codes only incidentally.
+#[test]
+fn preview_split_rejects_non_positive_amounts_without_a_minimum() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let jar_id = String::from_str(env, "@previewzero");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    assert_eq!(
+        client.try_preview_split(&jar_id, &0_i128),
+        Err(Ok(Error::AmountZero.into()))
+    );
+    assert_eq!(
+        client.try_preview_split(&jar_id, &-5_i128),
+        Err(Ok(Error::AmountNegative.into()))
+    );
+}
+
 /// A random valid bps distribution over `n` recipients: every share is at
 /// least 1 and the shares sum to exactly `BPS_DENOM`, mirroring what
 /// `validate_splits` requires.

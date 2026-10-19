@@ -2144,8 +2144,10 @@ impl TipSplitter {
     ///
     /// Rejects the same amounts `tip` rejects — non-positive, or small enough
     /// that some recipient's share would truncate to zero — so a preview that
-    /// returns at all describes a tip that can go through. Panics with
-    /// `JarNotFound` if the slug is unregistered.
+    /// returns at all describes a tip that can go through. The sign is checked
+    /// first, before the jar lookup and the jar's minimum, matching `tip`'s
+    /// order, so a client that previews and then tips sees the same error
+    /// (#97). Panics with `JarNotFound` if the slug is unregistered.
     ///
     /// One caveat: `tip` withholds a recipient's share when that recipient is
     /// the tipper, rather than making them pay themselves. This view does not
@@ -2154,6 +2156,16 @@ impl TipSplitter {
     /// [`Self::preview_tip`] instead, which takes the sender and matches the
     /// actual payout (#177).
     pub fn preview_split(env: Env, jar_id: String, amount: i128) -> Vec<i128> {
+        // Same precedence as `tip`: an unusable amount is refused before the
+        // jar lookup and before the minimum, so preview and payout report the
+        // identical error for the same amount (#97).
+        if amount == 0 {
+            panic_with_error!(&env, Error::AmountZero);
+        }
+        if amount < 0 {
+            panic_with_error!(&env, Error::AmountNegative);
+        }
+
         let key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
             .storage()

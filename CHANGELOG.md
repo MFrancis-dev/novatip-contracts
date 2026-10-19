@@ -31,6 +31,7 @@ All notable changes to `novatip-contracts` are documented here.
 - `tip` withholds a recipient's share when that recipient is also the tipper
 
 ### Fixed
+- `preview_split` checks the amount's sign before the jar's minimum, so a zero or negative amount reports `AmountZero`/`AmountNegative` exactly as `tip` does (#97)
 - `tip` and `create_recurring` reject messages that are not valid UTF-8 or that contain control characters other than newline, before any transfer, with the appended error 36 `InvalidMessage` (#96)
 - Zero-share splits rejected with `SplitOutOfRange` (was `InvalidSplits`)
 - Split validation reports specific codes: `SplitsEmpty` (10), `SplitOutOfRange` (11), `SplitSumNot100Pct` (12)
