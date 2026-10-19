@@ -48,6 +48,9 @@ const MAX_JAR_ID_LEN: u32 = 64;
 ///
 /// Clients should count UTF-8 bytes — not `message.length` in JavaScript or
 /// `len(message)` in Rust — to show an accurate remaining-bytes indicator.
+///
+/// Length is only half the contract: the bytes must also be valid UTF-8 text
+/// with no control characters other than `\n` (see `validate_message`).
 const MAX_MESSAGE_LEN: u32 = 280;
 
 /// Highest protocol fee the admin may configure, in basis points (5%).
@@ -401,6 +404,9 @@ pub enum Error {
     JarIdInUse = 34,
     /// `set_fee_bps` was given a fee above `MAX_FEE_BPS` (500 bps, 5%).
     FeeTooHigh = 35,
+    /// The message is not valid UTF-8 or contains a control character other
+    /// than newline. Checked before any funds move (#96).
+    InvalidMessage = 36,
 }
 
 /// The interface a post-tip hook contract must implement (#176).
@@ -1078,8 +1084,9 @@ impl TipSplitter {
     /// and marked `held` in the breakdown, while everyone else is paid normally.
     /// `withdraw_held` releases it once the recipient can receive again (#171).
     ///
-    /// `message` may be at most `MAX_MESSAGE_LEN` bytes; it is rejected before
-    /// any funds move.
+    /// `message` may be at most `MAX_MESSAGE_LEN` bytes, must be valid UTF-8,
+    /// and may not contain control characters other than newline; it is
+    /// rejected before any funds move.
     ///
     /// Returns the tip's sequence number, so the supporter's own client learns
     /// which tip it just sent without waiting for the event log. See
@@ -1244,9 +1251,7 @@ impl TipSplitter {
         if amount < 0 {
             panic_with_error!(env, Error::AmountNegative);
         }
-        if message.len() > MAX_MESSAGE_LEN {
-            panic_with_error!(env, Error::MessageTooLong);
-        }
+        Self::validate_message(env, message);
 
         let jar_key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
@@ -1725,7 +1730,8 @@ impl TipSplitter {
     /// Validated against the same checks `tip` applies so a stored schedule can
     /// actually be paid: the jar must exist, `amount` must be positive and pass
     /// `compute_shares` (no zero-truncated shares, no `i128` overflow) and clear
-    /// any per-jar minimum tip, the message must fit `MAX_MESSAGE_LEN`, and
+    /// any per-jar minimum tip, the message must be valid UTF-8 text with no
+    /// control characters other than newline and fit `MAX_MESSAGE_LEN`, and
     /// `period_ledgers` must be non-zero. The new entry records its first due
     /// ledger (`current + period_ledgers`) and is stored under a fresh id.
     ///
@@ -1748,9 +1754,7 @@ impl TipSplitter {
         if amount < 0 {
             panic_with_error!(&env, Error::AmountNegative);
         }
-        if message.len() > MAX_MESSAGE_LEN {
-            panic_with_error!(&env, Error::MessageTooLong);
-        }
+        Self::validate_message(&env, &message);
 
         let jar_key = DataKey::Jar(jar_id.clone());
         let jar: Jar = env
@@ -2574,6 +2578,36 @@ impl TipSplitter {
             env.storage()
                 .persistent()
                 .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        }
+    }
+
+    /// Validate a message's length and content (#96).
+    ///
+    /// A Soroban `String` is a byte buffer with no encoding guarantee, so
+    /// without this check a tipper can attach invalid UTF-8 or embedded
+    /// control bytes and the contract echoes them verbatim into the `tip`
+    /// event. Consumers assume text: the backend writes the message into a
+    /// Postgres text column, which rejects NUL, so such a tip is silently
+    /// dropped by the indexer, and invalid UTF-8 renders differently in every
+    /// client.
+    ///
+    /// Newline is allowed because the tip form offers multi-line input; every
+    /// other control character — including NUL, tab, carriage return and DEL —
+    /// is rejected. `char::is_control` also covers the C1 range, which is only
+    /// reachable through a valid multi-byte sequence.
+    ///
+    /// The check runs before any transfer, so a rejected tip moves no funds.
+    fn validate_message(env: &Env, message: &String) {
+        let len = message.len();
+        if len > MAX_MESSAGE_LEN {
+            panic_with_error!(env, Error::MessageTooLong);
+        }
+        let mut buf = [0u8; MAX_MESSAGE_LEN as usize];
+        message.copy_into_slice(&mut buf[..len as usize]);
+        let text = core::str::from_utf8(&buf[..len as usize])
+            .unwrap_or_else(|_| panic_with_error!(env, Error::InvalidMessage));
+        if text.chars().any(|c| c.is_control() && c != '\n') {
+            panic_with_error!(env, Error::InvalidMessage);
         }
     }
 

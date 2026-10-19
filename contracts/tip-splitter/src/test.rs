@@ -6789,6 +6789,7 @@ fn error_codes_are_pinned_to_the_public_interface() {
         (Error::ContractPaused, 33),
         (Error::JarIdInUse, 34),
         (Error::FeeTooHigh, 35),
+        (Error::InvalidMessage, 36),
     ];
 
     for (variant, expected) in codes {
@@ -8172,4 +8173,167 @@ fn non_admin_cannot_upgrade() {
     // Non-admin tries to upgrade - should fail with auth error
     let result = client.try_upgrade(&new_hash);
     assert!(result.is_err());
+}
+
+// ===========================================================================
+// #96 — message content validation
+// ===========================================================================
+
+/// A Soroban `String` is a raw byte buffer, so invalid UTF-8 is representable
+/// and would otherwise be echoed into the `tip` event where every consumer
+/// decodes it differently. It must be rejected before any transfer.
+#[test]
+fn tip_rejects_invalid_utf8_message() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &500);
+
+    let jar_id = String::from_str(env, "@utf8");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    // 0xc3 starts a two-byte sequence but 0x28 is not a continuation byte.
+    let invalid = String::from_bytes(env, &[0x00, 0xc3, 0x28]);
+    let res = client.try_tip(&tipper, &jar_id, &100, &invalid);
+    assert_eq!(res, Err(Ok(Error::InvalidMessage.into())));
+
+    assert_eq!(token.balance(&alice), 0, "alice must not have been paid");
+    assert_eq!(
+        token.balance(&tipper),
+        500,
+        "tipper balance must be unchanged"
+    );
+    assert_eq!(
+        client.get_tip_count(),
+        0,
+        "rejected tip must not be counted"
+    );
+}
+
+/// An embedded NUL is valid UTF-8 (U+0000) but Postgres `text` rejects it, so
+/// the indexer silently drops the whole tip. It must be rejected at the
+/// contract boundary.
+#[test]
+fn tip_rejects_message_with_embedded_nul() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &500);
+
+    let jar_id = String::from_str(env, "@nul");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    let with_nul = String::from_bytes(env, b"hello\0world");
+    let res = client.try_tip(&tipper, &jar_id, &100, &with_nul);
+    assert_eq!(res, Err(Ok(Error::InvalidMessage.into())));
+
+    assert_eq!(token.balance(&alice), 0);
+    assert_eq!(token.balance(&tipper), 500);
+}
+
+/// Every control character other than newline is rejected — the tip form only
+/// needs line breaks. Tab, carriage return and DEL are all outside what a text
+/// column should receive.
+#[test]
+fn tip_rejects_control_characters_but_allows_newline() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+    let token = token::Client::new(env, &s.token);
+    let token_admin = token::StellarAssetClient::new(env, &s.token);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let tipper = Address::generate(env);
+    token_admin.mint(&tipper, &1_000);
+
+    let jar_id = String::from_str(env, "@ctrl");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    for bytes in [b"a\tb".as_slice(), b"a\rb".as_slice(), b"a\x7fb".as_slice()] {
+        let message = String::from_bytes(env, bytes);
+        assert_eq!(
+            client.try_tip(&tipper, &jar_id, &100, &message),
+            Err(Ok(Error::InvalidMessage.into())),
+            "control bytes must be rejected"
+        );
+    }
+
+    // Newline is the one allowed control character: multi-line messages are
+    // accepted and the funds move.
+    let multi_line = String::from_str(env, "first line\nsecond line");
+    client.tip(&tipper, &jar_id, &100, &multi_line);
+    assert_eq!(token.balance(&alice), 100);
+    assert_eq!(token.balance(&tipper), 900);
+}
+
+/// A recurring schedule keeps its message on-chain and republishes it on every
+/// collection, so it shares the tip's content validation.
+#[test]
+fn create_recurring_rejects_invalid_message() {
+    let s = setup();
+    let env = &s.env;
+    let client = TipSplitterClient::new(env, &s.contract);
+
+    let owner = Address::generate(env);
+    let alice = Address::generate(env);
+    let supporter = Address::generate(env);
+    let jar_id = String::from_str(env, "@recmsg");
+    client.create_jar(
+        &owner,
+        &jar_id,
+        &vec![
+            env,
+            Split {
+                to: alice.clone(),
+                bps: 10000,
+            },
+        ],
+    );
+
+    let with_nul = String::from_bytes(env, b"monthly\0tip");
+    let res = client.try_create_recurring(&supporter, &jar_id, &500, &100, &with_nul);
+    assert_eq!(res, Err(Ok(Error::InvalidMessage.into())));
 }
