@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 15,
+    "address": 16,
     "nonce": 0
   },
   "auth": [
@@ -73,7 +73,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 838
+                            "u32": 927
                           }
                         },
                         {
@@ -93,7 +93,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 734
+                            "u32": 873
                           }
                         },
                         {
@@ -113,7 +113,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 932
+                            "u32": 1072
                           }
                         },
                         {
@@ -133,7 +133,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1538
+                            "u32": 903
                           }
                         },
                         {
@@ -153,7 +153,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 454
+                            "u32": 1094
                           }
                         },
                         {
@@ -173,7 +173,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1262
+                            "u32": 1281
                           }
                         },
                         {
@@ -193,7 +193,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 340
+                            "u32": 769
                           }
                         },
                         {
@@ -213,7 +213,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1287
+                            "u32": 1120
                           }
                         },
                         {
@@ -233,7 +233,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1570
+                            "u32": 991
                           }
                         },
                         {
@@ -253,7 +253,7 @@
                             "symbol": "bps"
                           },
                           "val": {
-                            "u32": 1045
+                            "u32": 471
                           }
                         },
                         {
@@ -262,6 +262,26 @@
                           },
                           "val": {
                             "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA6J5N"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "bps"
+                          },
+                          "val": {
+                            "u32": 499
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "to"
+                          },
+                          "val": {
+                            "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB6KO"
                           }
                         }
                       ]
@@ -275,6 +295,7 @@
         }
       ]
     ],
+    [],
     [],
     [],
     [],
@@ -304,7 +325,7 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 2438893
+                    "lo": 9226045
                   }
                 },
                 {
@@ -329,7 +350,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 204379
+                        "lo": 855254
                       }
                     }
                   ]
@@ -352,7 +373,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 179014
+                        "lo": 805433
                       }
                     }
                   ]
@@ -375,7 +396,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 227304
+                        "lo": 989032
                       }
                     }
                   ]
@@ -398,7 +419,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 375101
+                        "lo": 833111
                       }
                     }
                   ]
@@ -421,7 +442,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 110725
+                        "lo": 1009329
                       }
                     }
                   ]
@@ -444,7 +465,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 307788
+                        "lo": 1181856
                       }
                     }
                   ]
@@ -467,7 +488,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 82922
+                        "lo": 709482
                       }
                     }
                   ]
@@ -490,7 +511,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 313885
+                        "lo": 1033317
                       }
                     }
                   ]
@@ -513,7 +534,7 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 382906
+                        "lo": 914301
                       }
                     }
                   ]
@@ -536,7 +557,30 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 254869
+                        "lo": 434546
+                      }
+                    }
+                  ]
+                }
+              },
+              "sub_invocations": []
+            },
+            {
+              "function": {
+                "contract_fn": {
+                  "contract_address": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL",
+                  "function_name": "transfer",
+                  "args": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB6KO"
+                    },
+                    {
+                      "i128": {
+                        "hi": 0,
+                        "lo": 460384
                       }
                     }
                   ]
@@ -548,6 +592,7 @@
         }
       ]
     ],
+    [],
     [],
     [],
     [],
@@ -729,7 +774,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 838
+                                  "u32": 927
                                 }
                               },
                               {
@@ -749,7 +794,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 734
+                                  "u32": 873
                                 }
                               },
                               {
@@ -769,7 +814,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 932
+                                  "u32": 1072
                                 }
                               },
                               {
@@ -789,7 +834,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1538
+                                  "u32": 903
                                 }
                               },
                               {
@@ -809,7 +854,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 454
+                                  "u32": 1094
                                 }
                               },
                               {
@@ -829,7 +874,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1262
+                                  "u32": 1281
                                 }
                               },
                               {
@@ -849,7 +894,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 340
+                                  "u32": 769
                                 }
                               },
                               {
@@ -869,7 +914,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1287
+                                  "u32": 1120
                                 }
                               },
                               {
@@ -889,7 +934,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1570
+                                  "u32": 991
                                 }
                               },
                               {
@@ -909,7 +954,7 @@
                                   "symbol": "bps"
                                 },
                                 "val": {
-                                  "u32": 1045
+                                  "u32": 471
                                 }
                               },
                               {
@@ -918,6 +963,26 @@
                                 },
                                 "val": {
                                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA6J5N"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "map": [
+                              {
+                                "key": {
+                                  "symbol": "bps"
+                                },
+                                "val": {
+                                  "u32": 499
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "to"
+                                },
+                                "val": {
+                                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB6KO"
                                 }
                               }
                             ]
@@ -986,7 +1051,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 2438893
+                          "lo": 9226045
                         }
                       }
                     }
@@ -1057,7 +1122,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 2438893
+                          "lo": 9226045
                         }
                       }
                     }
@@ -1151,7 +1216,7 @@
             },
             "ext": "v0"
           },
-          4095
+          1000000
         ]
       ],
       [
@@ -1264,7 +1329,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 7561107
+                          "lo": 773955
                         }
                       }
                     },
@@ -1337,7 +1402,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 204379
+                          "lo": 855254
                         }
                       }
                     },
@@ -1410,7 +1475,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 179014
+                          "lo": 805433
                         }
                       }
                     },
@@ -1483,7 +1548,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 227304
+                          "lo": 989032
                         }
                       }
                     },
@@ -1556,7 +1621,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 375101
+                          "lo": 833111
                         }
                       }
                     },
@@ -1629,7 +1694,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 110725
+                          "lo": 1009329
                         }
                       }
                     },
@@ -1702,7 +1767,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 307788
+                          "lo": 1181856
                         }
                       }
                     },
@@ -1775,7 +1840,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 82922
+                          "lo": 709482
                         }
                       }
                     },
@@ -1848,7 +1913,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 313885
+                          "lo": 1033317
                         }
                       }
                     },
@@ -1921,7 +1986,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 382906
+                          "lo": 914301
                         }
                       }
                     },
@@ -1994,7 +2059,80 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 254869
+                          "lo": 434546
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "authorized"
+                      },
+                      "val": {
+                        "bool": true
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "clawback"
+                      },
+                      "val": {
+                        "bool": false
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "Balance"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB6KO"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CBEPDNVYXQGWB5YUBXKJWYJA7OXTZW5LFLNO5JRRGE6Z6C5OSUZPCCEL",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "Balance"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABB6KO"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "amount"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 460384
                         }
                       }
                     },
@@ -2153,7 +2291,7 @@
             },
             "ext": "v0"
           },
-          4095
+          1000000
         ]
       ]
     ]

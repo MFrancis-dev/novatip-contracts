@@ -506,7 +506,12 @@ slug names at submission time.
 | 27 | `SplitAmountTooSmall` | The amount — after the protocol fee, when one is set — is small enough that some recipient's share would truncate to zero (`net * bps < 10_000`). `get_min_accepted_tip` reports the smallest amount that clears it. |
 | 28 | `AmountOverflow` | `amount * bps` (or `amount * fee_bps`) would overflow `i128`. |
 | 29 | `InvalidMinimumAmount` | `set_min_tip_amount` was given a minimum that is zero or negative. |
-| 30 | `FeeTooHigh` | `set_fee_bps` was given a fee above `500` bps (5%). The stored fee is unchanged. |
+| 30 | `NoFundsMoved` | A tip where every share was skipped (every recipient is the tipper) would move no funds. |
+| 31 | `InvalidRecipient` | A split recipient or jar owner is the contract itself or its token. |
+| 32 | `AdminExists` | `transfer_admin` was called with the current admin's address. |
+| 33 | `ContractPaused` | A tip was attempted while the contract is paused. |
+| 34 | `JarIdInUse` | `rename_jar` was given a jar id that is already in use. |
+| 35 | `FeeTooHigh` | `set_fee_bps` was given a fee above `500` bps (5%). The stored fee is unchanged. |
 
 Error codes are part of the public interface: `@novatip/sdk` and the frontend
 both map these numbers to user-facing messages. New variants are **appended**
@@ -1081,7 +1086,7 @@ edit — none of those are visible to a consumer, and a version that changes whe
 nothing observable did is a version consumers stop trusting.
 
 This build ships `version() == 3`. Version 3 adds `set_fee_bps` /
-`get_fee_bps`, the `fee_set` event, the `FeeTooHigh` error (30), and the `fee`
+`get_fee_bps`, the `fee_set` event, the `FeeTooHigh` error (35), and the `fee`
 field in the `tip` event (#79); it also changes what a tipper who is a
 recipient pays (#78), which `preview_tip` already reports.
 
