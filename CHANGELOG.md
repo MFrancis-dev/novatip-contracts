@@ -19,7 +19,10 @@ All notable changes to `novatip-contracts` are documented here.
 - `min_tip` event and `BelowMinTipAmount` error (code 13)
 - `scripts/transfer-jar.sh`, `scripts/set-min-tip.sh`, `scripts/update-splits.sh`
 - Error codes 14 `TokenNotAllowed`, 15 `CannotDisallowDefault`, 16 `StatsOverflow`
-- `get_limits() -> Limits` reports `max_jar_id_len`, populated from `MAX_JAR_ID_LEN`, so onboarding can validate a slug against the contract's real bound instead of hardcoding 64 (#98). The returned map gains a field; a client decoding `Limits` into a fixed three-field type must add it
+- `get_limits() -> Limits` reports `max_jar_id_len`, the longest accepted jar id (`MAX_JAR_SLUG_LEN + 1`, i.e. `@` plus a 32-character body), so onboarding can validate a slug against the contract's real bound instead of hardcoding 64 (#98). The returned map gains a field; a client decoding `Limits` into a fixed three-field type must add it. With the canonical charset from #95 the effective maximum is 33 bytes, not the 64-byte `MAX_JAR_ID_LEN` storage cap
+
+### Changed (breaking: jar ids)
+- `create_jar` and `rename_jar` accept only canonical slugs — `@` followed by 3–32 characters from `[a-z0-9_-]`, matching the backend's `SLUG_REGEX` (#95). Upper case, whitespace, control bytes and lookalikes are rejected with `InvalidJarId`; `jar_exists` returns `false` for them.
 
 ### Changed (breaking: event payload)
 - The `tip` event (`TipEvent`) gained a `fee: i128` field: the protocol fee the tip moved to the admin (#79). `version()` is now `3`
@@ -29,6 +32,8 @@ All notable changes to `novatip-contracts` are documented here.
 - `tip` withholds a recipient's share when that recipient is also the tipper
 
 ### Fixed
+- `preview_split` checks the amount's sign before the jar's minimum, so a zero or negative amount reports `AmountZero`/`AmountNegative` exactly as `tip` does (#97)
+- `tip` and `create_recurring` reject messages that are not valid UTF-8 or that contain control characters other than newline, before any transfer, with the appended error 36 `InvalidMessage` (#96)
 - Zero-share splits rejected with `SplitOutOfRange` (was `InvalidSplits`)
 - Split validation reports specific codes: `SplitsEmpty` (10), `SplitOutOfRange` (11), `SplitSumNot100Pct` (12)
 - u32 overflow in split sum handled by `checked_add` instead of relying on `overflow-checks`

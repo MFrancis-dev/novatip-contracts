@@ -6,11 +6,11 @@
       "fields": [
         {
           "name": "bps",
-          "type": "u32"
+          "type_": "u32"
         },
         {
           "name": "to",
-          "type": "address"
+          "type_": "address"
         }
       ]
     }
@@ -22,11 +22,11 @@
       "fields": [
         {
           "name": "0",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "1",
-          "type": "u32"
+          "type_": "u32"
         }
       ]
     }
@@ -38,15 +38,15 @@
       "fields": [
         {
           "name": "locked",
-          "type": "bool"
+          "type_": "bool"
         },
         {
           "name": "owner",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "splits",
-          "type": {
+          "type_": {
             "vec": {
               "element_type": {
                 "udt": {
@@ -67,7 +67,7 @@
         {
           "tuple_v0": {
             "name": "V1",
-            "type": [
+            "type_": [
               {
                 "udt": {
                   "name": "Jar"
@@ -86,11 +86,11 @@
       "fields": [
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         },
         {
           "name": "to",
-          "type": "address"
+          "type_": "address"
         }
       ]
     }
@@ -102,11 +102,11 @@
       "fields": [
         {
           "name": "tip_count",
-          "type": "u64"
+          "type_": "u64"
         },
         {
           "name": "total",
-          "type": "i128"
+          "type_": "i128"
         }
       ]
     }
@@ -118,11 +118,11 @@
       "fields": [
         {
           "name": "tip_count",
-          "type": "u64"
+          "type_": "u64"
         },
         {
           "name": "total",
-          "type": "i128"
+          "type_": "i128"
         }
       ]
     }
@@ -134,19 +134,19 @@
       "fields": [
         {
           "name": "bps_denom",
-          "type": "u32"
+          "type_": "u32"
         },
         {
           "name": "max_jar_id_len",
-          "type": "u32"
+          "type_": "u32"
         },
         {
           "name": "max_message_len",
-          "type": "u32"
+          "type_": "u32"
         },
         {
           "name": "max_recipients",
-          "type": "u32"
+          "type_": "u32"
         }
       ]
     }
@@ -158,27 +158,27 @@
       "fields": [
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         },
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "message",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "next_due_ledger",
-          "type": "u32"
+          "type_": "u32"
         },
         {
           "name": "period_ledgers",
-          "type": "u32"
+          "type_": "u32"
         },
         {
           "name": "supporter",
-          "type": "address"
+          "type_": "address"
         }
       ]
     }
@@ -327,6 +327,10 @@
         {
           "name": "FeeTooHigh",
           "value": 35
+        },
+        {
+          "name": "InvalidMessage",
+          "value": 36
         }
       ]
     }
@@ -338,11 +342,11 @@
       "fields": [
         {
           "name": "owner",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "version",
-          "type": "u32"
+          "type_": "u32"
         }
       ]
     }
@@ -354,11 +358,11 @@
       "fields": [
         {
           "name": "count",
-          "type": "u32"
+          "type_": "u32"
         },
         {
           "name": "version",
-          "type": "u32"
+          "type_": "u32"
         }
       ]
     }
@@ -370,15 +374,15 @@
       "fields": [
         {
           "name": "new_owner",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "previous_owner",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "version",
-          "type": "u32"
+          "type_": "u32"
         }
       ]
     }
@@ -390,7 +394,7 @@
       "fields": [
         {
           "name": "amount",
-          "type": {
+          "type_": {
             "option": {
               "value_type": "i128"
             }
@@ -398,7 +402,7 @@
         },
         {
           "name": "version",
-          "type": "u32"
+          "type_": "u32"
         }
       ]
     }
@@ -410,11 +414,11 @@
       "fields": [
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         },
         {
           "name": "breakdown",
-          "type": {
+          "type_": {
             "vec": {
               "element_type": {
                 "tuple": {
@@ -430,19 +434,19 @@
         },
         {
           "name": "fee",
-          "type": "i128"
+          "type_": "i128"
         },
         {
           "name": "from",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "message",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "reference",
-          "type": {
+          "type_": {
             "option": {
               "value_type": {
                 "bytes_n": {
@@ -454,15 +458,15 @@
         },
         {
           "name": "seq",
-          "type": "u64"
+          "type_": "u64"
         },
         {
           "name": "token",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "version",
-          "type": "u32"
+          "type_": "u32"
         }
       ]
     }
@@ -474,11 +478,11 @@
       "fields": [
         {
           "name": "admin",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "new_hash",
-          "type": {
+          "type_": {
             "bytes_n": {
               "n": 32
             }
@@ -493,11 +497,11 @@
       "inputs": [
         {
           "name": "admin",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "token",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": []
@@ -509,7 +513,7 @@
       "inputs": [
         {
           "name": "token",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": []
@@ -521,7 +525,7 @@
       "inputs": [
         {
           "name": "token",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": []
@@ -533,15 +537,15 @@
       "inputs": [
         {
           "name": "owner",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "splits",
-          "type": {
+          "type_": {
             "vec": {
               "element_type": {
                 "udt": {
@@ -561,11 +565,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "splits",
-          "type": {
+          "type_": {
             "vec": {
               "element_type": {
                 "udt": {
@@ -585,7 +589,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": []
@@ -597,7 +601,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": []
@@ -609,7 +613,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -623,11 +627,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "recipient",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": []
@@ -639,11 +643,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "new_owner",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": []
@@ -655,7 +659,7 @@
       "inputs": [
         {
           "name": "new_admin",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": []
@@ -690,7 +694,7 @@
       "inputs": [
         {
           "name": "new_wasm_hash",
-          "type": {
+          "type_": {
             "bytes_n": {
               "n": 32
             }
@@ -706,11 +710,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "new_jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": []
@@ -722,11 +726,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "min_amount",
-          "type": {
+          "type_": {
             "option": {
               "value_type": "i128"
             }
@@ -742,19 +746,19 @@
       "inputs": [
         {
           "name": "from",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         },
         {
           "name": "message",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -768,23 +772,23 @@
       "inputs": [
         {
           "name": "from",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         },
         {
           "name": "message",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "reference",
-          "type": {
+          "type_": {
             "option": {
               "value_type": {
                 "bytes_n": {
@@ -806,23 +810,23 @@
       "inputs": [
         {
           "name": "from",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "token",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         },
         {
           "name": "message",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -836,7 +840,7 @@
       "inputs": [
         {
           "name": "hook",
-          "type": {
+          "type_": {
             "option": {
               "value_type": "address"
             }
@@ -865,7 +869,7 @@
       "inputs": [
         {
           "name": "registrar",
-          "type": {
+          "type_": {
             "option": {
               "value_type": "address"
             }
@@ -894,7 +898,7 @@
       "inputs": [
         {
           "name": "fee_bps",
-          "type": "u32"
+          "type_": "u32"
         }
       ],
       "outputs": []
@@ -924,7 +928,7 @@
       "inputs": [
         {
           "name": "recipient",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": [
@@ -938,7 +942,7 @@
       "inputs": [
         {
           "name": "recipient",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": []
@@ -950,23 +954,23 @@
       "inputs": [
         {
           "name": "supporter",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         },
         {
           "name": "period_ledgers",
-          "type": "u32"
+          "type_": "u32"
         },
         {
           "name": "message",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -980,7 +984,7 @@
       "inputs": [
         {
           "name": "id",
-          "type": "u128"
+          "type_": "u128"
         }
       ],
       "outputs": []
@@ -992,7 +996,7 @@
       "inputs": [
         {
           "name": "id",
-          "type": "u128"
+          "type_": "u128"
         }
       ],
       "outputs": [
@@ -1010,7 +1014,7 @@
       "inputs": [
         {
           "name": "id",
-          "type": "u128"
+          "type_": "u128"
         }
       ],
       "outputs": []
@@ -1022,7 +1026,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -1040,7 +1044,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -1054,7 +1058,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -1068,11 +1072,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         }
       ],
       "outputs": [
@@ -1090,11 +1094,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         }
       ],
       "outputs": [
@@ -1116,15 +1120,15 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "from",
-          "type": "address"
+          "type_": "address"
         },
         {
           "name": "amount",
-          "type": "i128"
+          "type_": "i128"
         }
       ],
       "outputs": [
@@ -1142,7 +1146,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -1160,7 +1164,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -1174,7 +1178,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -1192,11 +1196,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "supporter",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": [
@@ -1223,7 +1227,7 @@
       "inputs": [
         {
           "name": "token",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": [
@@ -1237,7 +1241,7 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         }
       ],
       "outputs": [
@@ -1251,11 +1255,11 @@
       "inputs": [
         {
           "name": "jar_id",
-          "type": "string"
+          "type_": "string"
         },
         {
           "name": "address",
-          "type": "address"
+          "type_": "address"
         }
       ],
       "outputs": [
