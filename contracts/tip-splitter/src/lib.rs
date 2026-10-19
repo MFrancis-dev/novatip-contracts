@@ -913,6 +913,21 @@ impl TipSplitter {
     /// Only the current admin may authorize this call. Emits an `upgrade` event
     /// carrying the new hash so indexers can track which code version handled
     /// each tip.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin = Self::require_admin(&env);
+        
+        // Deployer's update_current_contract_wasm replaces the running WASM
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+        
+        env.events().publish(
+            (symbol_short!("upgrade"),),
+            UpgradedEvent {
+                admin,
+                new_hash: new_wasm_hash,
+            },
+        );
+    }
+
     /// Rename a jar by moving it to a new id. Only the jar owner may do this.
     /// The old id stops resolving immediately, and the new id must not already be in use.
     /// Emits a `jar_rnm` event carrying both ids for indexer tracking.
