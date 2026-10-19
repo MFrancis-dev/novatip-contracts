@@ -576,6 +576,10 @@ impl TipSplitter {
             },
         );
 
+        env.events().publish(
+            (symbol_short!("jar_crtd"), jar_id),
+            JarCreatedEvent { owner },
+        );
         // Issue #91: extend instance TTL on jar creation so the contract stays
         // alive alongside its jars.
         env.storage()
@@ -646,6 +650,10 @@ impl TipSplitter {
             },
         );
 
+        env.events().publish(
+            (symbol_short!("splits"), jar_id),
+            SplitsUpdatedEvent { count: split_count },
+        );
         env.events()
             .publish((symbol_short!("splits"), jar_id), SplitsUpdatedEvent { version: 1, count: split_count });
     }
@@ -865,6 +873,10 @@ impl TipSplitter {
         // already replayed every prior event for that jar.
         env.events().publish(
             (symbol_short!("jar_xfer"), jar_id),
+            JarTransferredEvent {
+                previous_owner: prev_owner,
+                new_owner,
+            },
             JarTransferredEvent { version: 1, previous_owner: prev_owner, new_owner },
         );
     }
@@ -1023,6 +1035,10 @@ impl TipSplitter {
             }
         }
 
+        env.events().publish(
+            (symbol_short!("min_tip"), jar_id),
+            MinTipEvent { amount: min_amount },
+        );
         env.events()
             .publish((symbol_short!("min_tip"), jar_id), MinTipEvent { version: 1, amount: min_amount });
     }
@@ -1195,7 +1211,9 @@ impl TipSplitter {
         enforce_min: bool,
         reference: Option<BytesN<32>>,
     ) -> u64 {
-        if amount == 0 { panic_with_error!(env, Error::AmountZero); }
+        if amount == 0 {
+            panic_with_error!(env, Error::AmountZero);
+        }
         if amount < 0 {
             panic_with_error!(env, Error::AmountNegative);
         }
@@ -1332,6 +1350,13 @@ impl TipSplitter {
         env.events().publish(
             (symbol_short!("tip"), jar_id.clone()),
             TipEvent {
+                from: from.clone(),
+                amount,
+                message: message.clone(),
+                breakdown,
+                token: token_addr.clone(),
+                seq,
+                reference,
                 version: 1, from: from.clone(), amount, message: message.clone(), breakdown,
                 token: token_addr.clone(), seq, reference,
             },
@@ -1605,7 +1630,9 @@ impl TipSplitter {
         if period_ledgers == 0 {
             panic_with_error!(&env, Error::InvalidPeriod);
         }
-        if amount == 0 { panic_with_error!(&env, Error::AmountZero); }
+        if amount == 0 {
+            panic_with_error!(&env, Error::AmountZero);
+        }
         if amount < 0 {
             panic_with_error!(&env, Error::AmountNegative);
         }
@@ -1852,19 +1879,19 @@ impl TipSplitter {
             + 1;
         env.storage().instance().set(&DataKey::TipCount, &seq);
 
-        // Identical positional shape to `settle_tip`'s event; the collected
-        // payment carries no client reference, published as an explicit `None`.
+        // Same `TipEvent` shape as `settle_tip`'s event; the collected payment
+        // carries no client reference, published as an explicit `None`.
         env.events().publish(
             (symbol_short!("tip"), entry.jar_id.clone()),
-            (
-                entry.supporter.clone(),
-                entry.amount,
-                entry.message.clone(),
+            TipEvent {
+                from: entry.supporter.clone(),
+                amount: entry.amount,
+                message: entry.message.clone(),
                 breakdown,
-                token_addr.clone(),
+                token: token_addr.clone(),
                 seq,
-                Option::<BytesN<32>>::None,
-            ),
+                reference: None,
+            },
         );
 
         Self::call_tip_hook(&env, &entry.jar_id, &entry.supporter, entry.amount);
@@ -1980,13 +2007,21 @@ impl TipSplitter {
     /// `get_jar` round trip for clients that need to render the breakdown.
     pub fn preview_split_details(env: Env, jar_id: String, amount: i128) -> Vec<PreviewSplit> {
         let key = DataKey::Jar(jar_id.clone());
-        let jar: Jar = env.storage().persistent().get(&key)
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage().persistent().extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         let amounts = Self::compute_shares(&env, &jar.splits, amount);
         let mut result = Vec::new(&env);
         for i in 0..amounts.len() {
-            result.push_back(PreviewSplit { to: jar.splits.get(i).unwrap().to, amount: amounts.get(i).unwrap() });
+            result.push_back(PreviewSplit {
+                to: jar.splits.get(i).unwrap().to,
+                amount: amounts.get(i).unwrap(),
+            });
         }
         result
     }
@@ -2020,7 +2055,9 @@ impl TipSplitter {
         // Same precedence as `settle_tip`: an unusable amount is refused before
         // the jar lookup, so a client gets the identical error from preview
         // and from the tip itself.
-        if amount == 0 { panic_with_error!(&env, Error::AmountZero); }
+        if amount == 0 {
+            panic_with_error!(&env, Error::AmountZero);
+        }
         if amount < 0 {
             panic_with_error!(&env, Error::AmountNegative);
         }
@@ -2074,17 +2111,30 @@ impl TipSplitter {
     /// The result also respects the jar's optional minimum tip amount.
     pub fn get_min_accepted_tip(env: Env, jar_id: String) -> i128 {
         let key = DataKey::Jar(jar_id.clone());
-        let jar: Jar = env.storage().persistent().get(&key)
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage().persistent().extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         let mut smallest = 1i128;
         for i in 0..jar.splits.len() {
             let bps = jar.splits.get(i).unwrap().bps as i128;
             let required = (BPS_DENOM as i128 + bps - 1) / bps;
-            if required > smallest { smallest = required; }
+            if required > smallest {
+                smallest = required;
+            }
         }
-        if let Some(minimum) = env.storage().persistent().get::<DataKey, i128>(&DataKey::MinTip(jar_id)) {
-            if minimum > smallest { smallest = minimum; }
+        if let Some(minimum) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::MinTip(jar_id))
+        {
+            if minimum > smallest {
+                smallest = minimum;
+            }
         }
         smallest
     }
@@ -2204,7 +2254,9 @@ impl TipSplitter {
     /// returns a plain `bool` and reads one storage key, so the onboarding form
     /// can run it on every (debounced) keystroke.
     pub fn jar_exists(env: Env, jar_id: String) -> bool {
-        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN { return false; }
+        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN {
+            return false;
+        }
         env.storage().persistent().has(&DataKey::Jar(jar_id))
     }
 
@@ -2360,6 +2412,10 @@ impl TipSplitter {
             let share = if i == n - 1 {
                 amount - distributed
             } else {
+                amount
+                    .checked_mul(splits.get(i).unwrap().bps as i128)
+                    .unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow))
+                    / denom
                 let product = amount.checked_mul(splits.get(i).unwrap().bps as i128)
                     .unwrap_or_else(|| panic_with_error!(env, Error::InvalidAmount));
                 if product < denom { panic_with_error!(env, Error::InvalidAmount); }
