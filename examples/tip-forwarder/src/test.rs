@@ -8,6 +8,8 @@ struct Setup {
     env: Env,
     /// Account that may trigger forwarded tips from the forwarder's balance.
     owner: Address,
+    /// The splitter's admin, which receives the protocol fee (#79).
+    admin: Address,
     token: Address,
     splitter: Address,
     forwarder: Address,
@@ -35,6 +37,7 @@ fn setup() -> Setup {
     Setup {
         env,
         owner,
+        admin,
         token,
         splitter,
         forwarder,
@@ -99,35 +102,27 @@ fn forwarded_tip_pays_the_preview_amounts() {
 }
 
 #[test]
-fn naive_authorization_fails_when_the_forwarder_is_a_recipient() {
+fn naive_authorization_fails_once_a_protocol_fee_is_set() {
     let s = setup();
     let env = &s.env;
     let alice = Address::generate(env);
     let bob = Address::generate(env);
-    // The forwarder holds a 20 % slice of its own jar. `tip` will skip the
-    // self-transfer and roll that share into bob, so the amounts it actually
-    // transfers — alice 600, bob 400 — differ from the preview [600, 200, 200].
-    create_jar(
-        &s,
-        "@selfjar",
-        &[
-            (alice.clone(), 6000),
-            (s.forwarder.clone(), 2000),
-            (bob.clone(), 2000),
-        ],
-    );
+    create_jar(&s, "@band", &[(alice.clone(), 7000), (bob.clone(), 3000)]);
+    // 1%: `tip` now also transfers 10 of the 1 000 to the splitter's admin,
+    // a transfer the naive path never authorizes.
+    TipSplitterClient::new(env, &s.splitter).set_fee_bps(&100);
 
-    let message = String::from_str(env, "from me to me");
-    mock_owner_auth(&s, "forward_tip_naive", "@selfjar", 1_000, &message);
+    let message = String::from_str(env, "forgot the fee");
+    mock_owner_auth(&s, "forward_tip_naive", "@band", 1_000, &message);
 
     let res = TipForwarderClient::new(env, &s.forwarder).try_forward_tip_naive(
-        &String::from_str(env, "@selfjar"),
+        &String::from_str(env, "@band"),
         &1_000,
         &message,
     );
     assert!(
         res.is_err(),
-        "authorizing the raw preview amounts must fail once tip skips the self-transfer"
+        "authorizing only the recipients' shares must fail once tip also pays a fee"
     );
 
     // Nothing moved: the tip reverted with the auth error.
@@ -138,7 +133,33 @@ fn naive_authorization_fails_when_the_forwarder_is_a_recipient() {
 }
 
 #[test]
-fn adjusted_authorization_pays_when_the_forwarder_is_a_recipient() {
+fn forwarded_tip_authorizes_the_protocol_fee() {
+    let s = setup();
+    let env = &s.env;
+    let alice = Address::generate(env);
+    let bob = Address::generate(env);
+    create_jar(&s, "@band", &[(alice.clone(), 7000), (bob.clone(), 3000)]);
+    TipSplitterClient::new(env, &s.splitter).set_fee_bps(&100);
+
+    let message = String::from_str(env, "with the fee");
+    mock_owner_auth(&s, "forward_tip", "@band", 1_000, &message);
+
+    TipForwarderClient::new(env, &s.forwarder).forward_tip(
+        &String::from_str(env, "@band"),
+        &1_000,
+        &message,
+    );
+
+    // 10 to the admin, then 990 split 70/30.
+    let token = token::Client::new(env, &s.token);
+    assert_eq!(token.balance(&s.admin), 10);
+    assert_eq!(token.balance(&alice), 693);
+    assert_eq!(token.balance(&bob), 297);
+    assert_eq!(token.balance(&s.forwarder), 0);
+}
+
+#[test]
+fn forwarder_keeps_its_own_share_when_it_is_a_recipient() {
     let s = setup();
     let env = &s.env;
     let alice = Address::generate(env);
@@ -162,10 +183,11 @@ fn adjusted_authorization_pays_when_the_forwarder_is_a_recipient() {
         &message,
     );
 
-    // forward_tip authorizes the corrected list: alice 600, bob 400 (his 200
-    // plus the withheld self-transfer). The forwarder pays itself nothing.
+    // preview_tip reports [600, 0, 200]: `tip` makes no transfer to the
+    // forwarder, so its 200 never leaves it, and alice and bob receive
+    // exactly their shares.
     let token = token::Client::new(env, &s.token);
     assert_eq!(token.balance(&alice), 600);
-    assert_eq!(token.balance(&bob), 400);
-    assert_eq!(token.balance(&s.forwarder), 0);
+    assert_eq!(token.balance(&bob), 200);
+    assert_eq!(token.balance(&s.forwarder), 200);
 }

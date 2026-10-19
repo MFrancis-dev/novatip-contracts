@@ -50,6 +50,16 @@ const MAX_JAR_ID_LEN: u32 = 64;
 /// `len(message)` in Rust — to show an accurate remaining-bytes indicator.
 const MAX_MESSAGE_LEN: u32 = 280;
 
+/// Highest protocol fee the admin may configure, in basis points (5%).
+///
+/// The fee is taken from every tip before the split, so an uncapped value
+/// would let a compromised or careless admin key swallow a tip outright. 5%
+/// matches what Buy Me a Coffee charges and stays well under Patreon's 8–12%;
+/// the intended configured value is 100 bps (1%), which keeps cross-border
+/// micro-tipping viable. `set_fee_bps` rejects anything above this with
+/// `FeeTooHigh`.
+const MAX_FEE_BPS: u32 = 500;
+
 /// Width, in bytes, of the optional client reference a tipper may attach.
 ///
 /// A reference is an opaque id the integration uses to match the on-chain
@@ -101,7 +111,7 @@ const JAR_TTL_THRESHOLD: u32 = 500_000;
 ///
 /// This is a per-contract number for client feature detection. It complements
 /// the per-event schema version proposed in #83 rather than replacing it.
-const INTERFACE_VERSION: u32 = 2;
+const INTERFACE_VERSION: u32 = 3;
 
 /// One recipient and the share of every tip they receive, in basis points.
 #[contracttype]
@@ -278,6 +288,11 @@ pub enum DataKey {
     /// while it is set (#178). Instance storage; absence means jar creation
     /// stays exactly as it was: owner auth only.
     Registrar,
+    /// Protocol fee taken from every tip before the split, in basis points
+    /// (#79). Instance storage, like the other configuration keys; absence
+    /// means 0, so an upgraded deployment charges nothing until the admin
+    /// opts in with `set_fee_bps`.
+    FeeBps,
 }
 
 /// Public error codes. The numbers are part of the client interface —
@@ -358,6 +373,8 @@ pub enum Error {
     AmountOverflow = 28,
     /// A configured minimum tip must be positive.
     InvalidMinimumAmount = 29,
+    /// `set_fee_bps` was given a fee above `MAX_FEE_BPS` (500 bps, 5%).
+    FeeTooHigh = 30,
 }
 
 /// The interface a post-tip hook contract must implement (#176).
@@ -415,7 +432,12 @@ pub struct MinTipEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TipEvent {
     pub from: Address,
+    /// The gross tip, before the protocol fee.
     pub amount: i128,
+    /// The protocol fee this tip moved to the admin (#79); `0` when no fee is
+    /// configured. `fee` plus the breakdown's `moved` values, plus the share
+    /// of a tipper who is also a recipient, equals `amount` exactly.
+    pub fee: i128,
     pub message: String,
     pub breakdown: Vec<(Address, i128, bool)>,
     pub token: Address,
@@ -527,8 +549,10 @@ impl TipSplitter {
             },
         );
 
-        env.events()
-            .publish((symbol_short!("jar_crtd"), jar_id), JarCreatedEvent { owner });
+        env.events().publish(
+            (symbol_short!("jar_crtd"), jar_id),
+            JarCreatedEvent { owner },
+        );
     }
 
     /// Update an existing jar's splits. Only the jar owner may do this.
@@ -586,8 +610,10 @@ impl TipSplitter {
             },
         );
 
-        env.events()
-            .publish((symbol_short!("splits"), jar_id), SplitsUpdatedEvent { count: split_count });
+        env.events().publish(
+            (symbol_short!("splits"), jar_id),
+            SplitsUpdatedEvent { count: split_count },
+        );
     }
 
     /// Lock a jar's splits so the owner can no longer reduce or remove a
@@ -796,7 +822,10 @@ impl TipSplitter {
         // already replayed every prior event for that jar.
         env.events().publish(
             (symbol_short!("jar_xfer"), jar_id),
-            JarTransferredEvent { previous_owner: prev_owner, new_owner },
+            JarTransferredEvent {
+                previous_owner: prev_owner,
+                new_owner,
+            },
         );
     }
 
@@ -834,8 +863,10 @@ impl TipSplitter {
             }
         }
 
-        env.events()
-            .publish((symbol_short!("min_tip"), jar_id), MinTipEvent { amount: min_amount });
+        env.events().publish(
+            (symbol_short!("min_tip"), jar_id),
+            MinTipEvent { amount: min_amount },
+        );
     }
 
     /// Send a tip of `amount` of the deploy-time default token from `from`,
@@ -1000,7 +1031,9 @@ impl TipSplitter {
         enforce_min: bool,
         reference: Option<BytesN<32>>,
     ) -> u64 {
-        if amount == 0 { panic_with_error!(env, Error::AmountZero); }
+        if amount == 0 {
+            panic_with_error!(env, Error::AmountZero);
+        }
         if amount < 0 {
             panic_with_error!(env, Error::AmountNegative);
         }
@@ -1047,14 +1080,25 @@ impl TipSplitter {
         }
 
         let n = jar.splits.len();
-        // One shared calculation with `preview_split` and `preview_tip`, so the
-        // number a client shows before signing is the number paid out here.
-        let plan = Self::payout_amounts(env, &jar.splits, from, amount);
+        // The protocol fee comes off the top (#79); the split, its
+        // too-small-to-split guard and its dust rule all apply to what is
+        // left. One shared calculation with `preview_split` and `preview_tip`,
+        // so the number a client shows before signing is the number paid out
+        // here.
+        let (fee, net) = Self::split_fee(env, amount);
+        let plan = Self::payout_amounts(env, &jar.splits, from, net);
+        let fee_moved = match Self::fee_payee(env, from, fee) {
+            Some(admin) => {
+                client.transfer(from, &admin, &fee);
+                fee
+            }
+            None => 0,
+        };
 
         // The per-recipient breakdown published in the `tip` event, in split
         // order. Each entry is `(recipient, moved, held)`: `moved` is what left
-        // the tipper for that recipient this call (0 for a self-transfer that
-        // was rolled into the last recipient), and `held` marks a share the
+        // the tipper for that recipient this call (0 for a tipper who is also
+        // a recipient and keeps their share), and `held` marks a share the
         // recipient could not receive and the contract is now escrowing (#171).
         // Recording it as the transfers happen is what makes the event
         // self-describing: an indexer that recomputed the split arithmetic from
@@ -1118,8 +1162,14 @@ impl TipSplitter {
         env.events().publish(
             (symbol_short!("tip"), jar_id.clone()),
             TipEvent {
-                from: from.clone(), amount, message: message.clone(), breakdown,
-                token: token_addr.clone(), seq, reference,
+                from: from.clone(),
+                amount,
+                fee: fee_moved,
+                message: message.clone(),
+                breakdown,
+                token: token_addr.clone(),
+                seq,
+                reference,
             },
         );
 
@@ -1230,6 +1280,80 @@ impl TipSplitter {
     /// `None` when jar creation is permissionless as before (#178).
     pub fn get_registrar(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::Registrar)
+    }
+
+    /// Set the protocol fee taken from every tip, in basis points (#79).
+    /// Admin-only.
+    ///
+    /// Every tip used to go entirely to the jar's recipients, leaving the
+    /// platform no on-chain way to fund itself. A fee taken here is more
+    /// honest than one taken off-chain: a tipper can read it with
+    /// `get_fee_bps` before signing.
+    ///
+    /// The fee is `amount * fee_bps / 10_000`, truncated, and comes off the tip
+    /// *before* the split. The too-small-to-split guard and the last
+    /// recipient's dust rule therefore both apply to the post-fee amount, and
+    /// the recipients' total plus the fee equals the tip exactly. The fee is
+    /// paid to the contract admin.
+    ///
+    /// Defaults to 0, so no existing deployment starts charging on upgrade.
+    /// Values above `MAX_FEE_BPS` (500, i.e. 5%) are rejected with
+    /// `FeeTooHigh`, so the fee can never be set to swallow a tip. `0` turns
+    /// the fee off again.
+    ///
+    /// Emits a `fee_set` event carrying the admin and the new value.
+    pub fn set_fee_bps(env: Env, fee_bps: u32) {
+        let admin = Self::require_admin(&env);
+        if fee_bps > MAX_FEE_BPS {
+            panic_with_error!(&env, Error::FeeTooHigh);
+        }
+        env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+        env.events()
+            .publish((symbol_short!("fee_set"), admin), fee_bps);
+    }
+
+    /// The protocol fee currently taken from every tip, in basis points (#79).
+    /// `0` until the admin sets one.
+    ///
+    /// A tip form should show this before the supporter signs. The exact fee
+    /// on a given amount is `amount - sum(preview_split(jar_id, amount))`,
+    /// because every preview already reports post-fee shares.
+    pub fn get_fee_bps(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
+    }
+
+    /// Split a gross tip into `(fee, net)` under the configured fee (#79).
+    ///
+    /// The fee truncates, so any rounding favours the tipper's recipients, and
+    /// `fee + net == amount` always. With `fee_bps <= MAX_FEE_BPS` the net is
+    /// at least 95% of the tip, so a positive amount always leaves a positive
+    /// net for `compute_shares` to split.
+    fn split_fee(env: &Env, amount: i128) -> (i128, i128) {
+        let fee_bps = Self::get_fee_bps(env.clone());
+        if fee_bps == 0 {
+            return (0, amount);
+        }
+        let fee = amount
+            .checked_mul(fee_bps as i128)
+            .unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow))
+            / BPS_DENOM as i128;
+        (fee, amount - fee)
+    }
+
+    /// Who a fee of `fee` should be transferred to, or `None` when nothing
+    /// moves: no fee, or the tipper is the admin. That second case is the
+    /// self-transfer rule applied to the fee, and the `tip` event then
+    /// reports a fee of 0 because nothing moved.
+    fn fee_payee(env: &Env, from: &Address, fee: i128) -> Option<Address> {
+        if fee == 0 {
+            return None;
+        }
+        let admin = Self::get_admin(env.clone());
+        if admin == *from {
+            None
+        } else {
+            Some(admin)
+        }
     }
 
     /// The number of tips this contract has taken, and the sequence number the
@@ -1391,7 +1515,9 @@ impl TipSplitter {
         if period_ledgers == 0 {
             panic_with_error!(&env, Error::InvalidPeriod);
         }
-        if amount == 0 { panic_with_error!(&env, Error::AmountZero); }
+        if amount == 0 {
+            panic_with_error!(&env, Error::AmountZero);
+        }
         if amount < 0 {
             panic_with_error!(&env, Error::AmountNegative);
         }
@@ -1416,7 +1542,8 @@ impl TipSplitter {
 
         // Runs the tip's split arithmetic so a schedule whose amount could never
         // be paid (dust-truncation or overflow) is rejected at registration.
-        let _ = Self::compute_shares(&env, &jar.splits, amount);
+        let (_, net) = Self::split_fee(&env, amount);
+        let _ = Self::compute_shares(&env, &jar.splits, net);
 
         let count_key = DataKey::RecurringCount;
         let count: u128 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -1491,7 +1618,7 @@ impl TipSplitter {
     /// `amount` per period). Each recipient's share is moved with
     /// `transfer_from` with the contract itself as spender, split by the same
     /// [`Self::payout_amounts`] arithmetic as a manual `tip` — including the
-    /// tipper-is-recipient skip, the dust roll-in, and the held-escrow fallback
+    /// protocol fee (#79), the tipper-is-recipient skip, and the held-escrow fallback
     /// (#171). The `tip` event is published in the identical shape with the
     /// supporter as `from` and an absent reference, so the indexer, webhooks
     /// and analytics pick a collected tip up exactly like a manual one. The
@@ -1575,7 +1702,18 @@ impl TipSplitter {
         // The same split a manual tip of this amount from this supporter would
         // produce — one shared helper, so collection can never drift from the
         // preview or the tip (#177).
-        let plan = Self::payout_amounts(&env, &jar.splits, &entry.supporter, entry.amount);
+        let (fee, net) = Self::split_fee(&env, entry.amount);
+        let plan = Self::payout_amounts(&env, &jar.splits, &entry.supporter, net);
+        // Same fee rule as `settle_tip`, drawn from the same allowance: the
+        // fee plus the plan never exceeds `amount`, so the gate above covers
+        // both.
+        let fee_moved = match Self::fee_payee(&env, &entry.supporter, fee) {
+            Some(admin) => {
+                client.transfer_from(&contract_addr, &entry.supporter, &admin, &fee);
+                fee
+            }
+            None => 0,
+        };
 
         let mut breakdown: Vec<(Address, i128, bool)> = Vec::new(&env);
         for i in 0..jar.splits.len() {
@@ -1638,19 +1776,20 @@ impl TipSplitter {
             + 1;
         env.storage().instance().set(&DataKey::TipCount, &seq);
 
-        // Identical positional shape to `settle_tip`'s event; the collected
-        // payment carries no client reference, published as an explicit `None`.
+        // Identical shape to `settle_tip`'s event; the collected payment
+        // carries no client reference, published as an explicit `None`.
         env.events().publish(
             (symbol_short!("tip"), entry.jar_id.clone()),
-            (
-                entry.supporter.clone(),
-                entry.amount,
-                entry.message.clone(),
+            TipEvent {
+                from: entry.supporter.clone(),
+                amount: entry.amount,
+                fee: fee_moved,
+                message: entry.message.clone(),
                 breakdown,
-                token_addr.clone(),
+                token: token_addr.clone(),
                 seq,
-                Option::<BytesN<32>>::None,
-            ),
+                reference: None,
+            },
         );
 
         Self::call_tip_hook(&env, &entry.jar_id, &entry.supporter, entry.amount);
@@ -1727,8 +1866,10 @@ impl TipSplitter {
     /// rule in two places and let the two drift apart. This runs the same
     /// arithmetic `tip` does, so the preview is the payout — dust included.
     ///
-    /// The returned shares always sum to exactly `amount`: the final recipient
-    /// absorbs whatever the integer divisions truncated.
+    /// The shares are of the post-fee amount (#79): they always sum to exactly
+    /// `amount` minus the protocol fee, and the final recipient absorbs
+    /// whatever the integer divisions truncated. With no fee configured that
+    /// is `amount` itself.
     ///
     /// Rejects the same amounts `tip` rejects — non-positive, or small enough
     /// that some recipient's share would truncate to zero — so a preview that
@@ -1762,20 +1903,30 @@ impl TipSplitter {
                 .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         }
 
-        Self::compute_shares(&env, &jar.splits, amount)
+        let (_, net) = Self::split_fee(&env, amount);
+        Self::compute_shares(&env, &jar.splits, net)
     }
 
     /// Return the preview together with each recipient, avoiding a second
     /// `get_jar` round trip for clients that need to render the breakdown.
     pub fn preview_split_details(env: Env, jar_id: String, amount: i128) -> Vec<PreviewSplit> {
         let key = DataKey::Jar(jar_id.clone());
-        let jar: Jar = env.storage().persistent().get(&key)
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage().persistent().extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
-        let amounts = Self::compute_shares(&env, &jar.splits, amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        let (_, net) = Self::split_fee(&env, amount);
+        let amounts = Self::compute_shares(&env, &jar.splits, net);
         let mut result = Vec::new(&env);
         for i in 0..amounts.len() {
-            result.push_back(PreviewSplit { to: jar.splits.get(i).unwrap().to, amount: amounts.get(i).unwrap() });
+            result.push_back(PreviewSplit {
+                to: jar.splits.get(i).unwrap().to,
+                amount: amounts.get(i).unwrap(),
+            });
         }
         result
     }
@@ -1786,7 +1937,7 @@ impl TipSplitter {
     ///
     /// `preview_split` does not know who is tipping, and `tip` treats a
     /// recipient who is also the sender differently: their share is not
-    /// transferred and the last recipient absorbs the dust. For a collaborator
+    /// transferred and stays with them. For a collaborator
     /// tipping their own jar the two previews used to disagree, and the old
     /// advice to "account for that itself" reintroduced exactly the duplicated
     /// arithmetic `preview_split` exists to remove. This view closes the gap.
@@ -1809,7 +1960,9 @@ impl TipSplitter {
         // Same precedence as `settle_tip`: an unusable amount is refused before
         // the jar lookup, so a client gets the identical error from preview
         // and from the tip itself.
-        if amount == 0 { panic_with_error!(&env, Error::AmountZero); }
+        if amount == 0 {
+            panic_with_error!(&env, Error::AmountZero);
+        }
         if amount < 0 {
             panic_with_error!(&env, Error::AmountNegative);
         }
@@ -1833,7 +1986,8 @@ impl TipSplitter {
                 .extend_ttl(&min_key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
         }
 
-        Self::payout_amounts(&env, &jar.splits, &from, amount)
+        let (_, net) = Self::split_fee(&env, amount);
+        Self::payout_amounts(&env, &jar.splits, &from, net)
     }
 
     /// Read a jar's optional minimum tip amount.
@@ -1860,20 +2014,41 @@ impl TipSplitter {
     }
 
     /// Return the smallest positive tip that can pay every configured split.
-    /// The result also respects the jar's optional minimum tip amount.
+    /// The result also respects the jar's optional minimum tip amount and the
+    /// protocol fee, which comes off before the split (#79).
     pub fn get_min_accepted_tip(env: Env, jar_id: String) -> i128 {
         let key = DataKey::Jar(jar_id.clone());
-        let jar: Jar = env.storage().persistent().get(&key)
+        let jar: Jar = env
+            .storage()
+            .persistent()
+            .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::JarNotFound));
-        env.storage().persistent().extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
-        let mut smallest = 1i128;
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, JAR_TTL_THRESHOLD, JAR_TTL_LEDGERS);
+        let denom = BPS_DENOM as i128;
+        // The smallest post-fee amount that pays every recipient.
+        let mut net = 1i128;
         for i in 0..jar.splits.len() {
             let bps = jar.splits.get(i).unwrap().bps as i128;
-            let required = (BPS_DENOM as i128 + bps - 1) / bps;
-            if required > smallest { smallest = required; }
+            let required = (denom + bps - 1) / bps;
+            if required > net {
+                net = required;
+            }
         }
-        if let Some(minimum) = env.storage().persistent().get::<DataKey, i128>(&DataKey::MinTip(jar_id)) {
-            if minimum > smallest { smallest = minimum; }
+        // The smallest gross amount `a` whose net `a - floor(a * fee / D)`,
+        // i.e. `ceil(a * (D - fee) / D)`, reaches `net`. That holds exactly
+        // when `a * (D - fee) > (net - 1) * D`. With no fee this is `net`.
+        let fee_bps = Self::get_fee_bps(env.clone()) as i128;
+        let mut smallest = (net - 1) * denom / (denom - fee_bps) + 1;
+        if let Some(minimum) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, i128>(&DataKey::MinTip(jar_id))
+        {
+            if minimum > smallest {
+                smallest = minimum;
+            }
         }
         smallest
     }
@@ -1993,7 +2168,9 @@ impl TipSplitter {
     /// returns a plain `bool` and reads one storage key, so the onboarding form
     /// can run it on every (debounced) keystroke.
     pub fn jar_exists(env: Env, jar_id: String) -> bool {
-        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN { return false; }
+        if jar_id.is_empty() || jar_id.len() > MAX_JAR_ID_LEN {
+            return false;
+        }
         env.storage().persistent().has(&DataKey::Jar(jar_id))
     }
 
@@ -2064,12 +2241,17 @@ impl TipSplitter {
     /// The amounts a settled tip of `amount` from `from` actually transfers,
     /// one per recipient in split order (#177).
     ///
-    /// This is `compute_shares` plus the two sender-dependent rules the old
-    /// `tip` loop carried inline: a recipient who *is* the sender is skipped
-    /// (reported as `0` — no self-transfer, the share stays with the tipper),
-    /// and every skipped share rolls into the final recipient's remainder, so
-    /// the positive entries still sum to `amount` whenever the sender is not
-    /// the last recipient. `settle_tip` pays exactly these numbers out and
+    /// This is `compute_shares` plus the one sender-dependent rule: a
+    /// recipient who *is* the sender is reported as `0` — no self-transfer,
+    /// and their share stays with them. Every other recipient gets exactly
+    /// their `compute_shares` entry, so what leaves the tipper is what the
+    /// other recipients receive, and that is `amount` minus the tipper's own
+    /// share.
+    ///
+    /// An earlier version rolled the withheld share into the last recipient,
+    /// which made a tipper who held a share pay it out to someone else (#78).
+    ///
+    /// `settle_tip` pays exactly these numbers out and
     /// [`Self::preview_tip`] reports them, which is what keeps a tip's event
     /// breakdown and its preview from ever diverging; `collect_recurring`
     /// builds its `transfer_from` plan from here too.
@@ -2078,22 +2260,12 @@ impl TipSplitter {
     /// tip of this jar could not pay.
     fn payout_amounts(env: &Env, splits: &Vec<Split>, from: &Address, amount: i128) -> Vec<i128> {
         let shares = Self::compute_shares(env, splits, amount);
-        let n = splits.len();
         let mut plan: Vec<i128> = Vec::new(env);
-        let mut skipped: i128 = 0;
-        for i in 0..n {
-            let split = splits.get(i).unwrap();
-            let mut share = shares.get(i).unwrap();
-            if i == n - 1 {
-                // A share withheld from a self-transfer above was never sent,
-                // so it rolls into the last recipient's remainder.
-                share += skipped;
-            }
-            if share > 0 && split.to != *from {
-                plan.push_back(share);
-            } else {
-                skipped += share;
+        for i in 0..splits.len() {
+            if splits.get(i).unwrap().to == *from {
                 plan.push_back(0);
+            } else {
+                plan.push_back(shares.get(i).unwrap());
             }
         }
         plan
@@ -2150,10 +2322,6 @@ impl TipSplitter {
             let share = if i == n - 1 {
                 amount - distributed
             } else {
-                let product = amount.checked_mul(splits.get(i).unwrap().bps as i128)
-                    .unwrap_or_else(|| panic_with_error!(env, Error::InvalidAmount));
-                if product < denom { panic_with_error!(env, Error::InvalidAmount); }
-                product / denom
                 amount
                     .checked_mul(splits.get(i).unwrap().bps as i128)
                     .unwrap_or_else(|| panic_with_error!(env, Error::AmountOverflow))

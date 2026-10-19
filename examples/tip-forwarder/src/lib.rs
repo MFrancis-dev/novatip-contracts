@@ -7,13 +7,15 @@
 //! one with `env.authorize_as_current_contract`, listing every recipient and
 //! the exact amount, or the tip fails with an auth error.
 //!
-//! The amounts to authorize are what `preview_split` returns, with one
-//! exception: if the calling contract is itself a recipient, `tip` skips the
-//! transfer to it and rolls that share into the last recipient (issue #66),
-//! so the amounts to authorize then differ from the preview.
-//! [`forward_tip`] does the adjustment; [`forward_tip_naive`] deliberately
-//! does not, and the tests in `src/test.rs` show it failing for exactly that
-//! reason.
+//! The amounts to authorize are what `preview_tip(jar_id, myself, amount)`
+//! returns — the sender-aware preview, which reports `0` for a recipient who
+//! is the caller itself, because `tip` makes no transfer to it and the share
+//! stays with the caller — plus, once the admin has set a protocol fee (#79),
+//! one more transfer: the fee, paid to the contract admin. Every preview
+//! reports post-fee shares, so the fee is `amount - sum(preview_split)`.
+//! [`forward_tip`] authorizes both; [`forward_tip_naive`] deliberately
+//! forgets the fee, and the tests in `src/test.rs` show it failing for
+//! exactly that reason.
 //!
 //! The `tip_splitter` interface this contract calls is declared locally with
 //! `#[contractclient]` instead of imported with `contractimport!`, so
@@ -34,7 +36,9 @@ use soroban_sdk::{
 pub trait SplitterInterface {
     fn get_jar(env: Env, jar_id: String) -> Jar;
     fn preview_split(env: Env, jar_id: String, amount: i128) -> Vec<i128>;
+    fn preview_tip(env: Env, jar_id: String, from: Address, amount: i128) -> Vec<i128>;
     fn get_token(env: Env) -> Address;
+    fn get_admin(env: Env) -> Address;
     fn tip(env: Env, from: Address, jar_id: String, amount: i128, message: String) -> u64;
 }
 
@@ -87,22 +91,22 @@ impl TipForwarder {
     /// Tip `jar_id` `amount` from this contract's own balance. The owner must
     /// authorize.
     ///
-    /// Authorizes exactly the transfers `tip` will make: the preview's shares,
-    /// corrected for the case where this contract is itself a recipient.
+    /// Authorizes exactly the transfers `tip` will make: the sender-aware
+    /// preview's shares, plus the protocol fee when one is configured.
     pub fn forward_tip(env: Env, jar_id: String, amount: i128, message: String) {
         Self::forward(env, jar_id, amount, message, true);
     }
 
-    /// Same as [`forward_tip`], but authorizes the raw `preview_split` amounts
-    /// without the self-recipient correction. Exists so the tests can show
-    /// the failure mode; production callers should use [`forward_tip`].
+    /// Same as [`forward_tip`], but authorizes only the recipients' shares and
+    /// forgets the protocol fee transfer. Exists so the tests can show the
+    /// failure mode; production callers should use [`forward_tip`].
     pub fn forward_tip_naive(env: Env, jar_id: String, amount: i128, message: String) {
         Self::forward(env, jar_id, amount, message, false);
     }
 }
 
 impl TipForwarder {
-    fn forward(env: Env, jar_id: String, amount: i128, message: String, adjust: bool) {
+    fn forward(env: Env, jar_id: String, amount: i128, message: String, with_fee: bool) {
         let owner: Address = env
             .storage()
             .instance()
@@ -118,24 +122,23 @@ impl TipForwarder {
         let client = SplitterClient::new(&env, &splitter);
         let myself = env.current_contract_address();
 
-        // preview_split is the payout `tip` will make, so it is also the list
-        // to authorize — except when this contract is itself a recipient, in
-        // which case `tip` withholds the self-transfer and rolls it into the
-        // last recipient's share.
-        let shares = client.preview_split(&jar_id, &amount);
+        // preview_tip is the payout `tip` will make for this sender: a share
+        // that would go to this contract itself is reported as 0 and never
+        // transferred, so it needs no authorization.
+        let plan = client.preview_tip(&jar_id, &myself, &amount);
         let jar = client.get_jar(&jar_id);
-        let transfers = if adjust {
-            Self::actual_transfers(&env, &jar.splits, &shares, &myself)
-        } else {
-            let mut out: Vec<(Address, i128)> = Vec::new(&env);
-            for i in 0..shares.len() {
-                let share = shares.get(i).unwrap();
-                if share > 0 {
-                    out.push_back((jar.splits.get(i).unwrap().to, share));
-                }
+        let mut transfers: Vec<(Address, i128)> = Vec::new(&env);
+        for i in 0..plan.len() {
+            let share = plan.get(i).unwrap();
+            if share > 0 {
+                transfers.push_back((jar.splits.get(i).unwrap().to, share));
             }
-            out
-        };
+        }
+        if with_fee {
+            if let Some(fee) = Self::fee_transfer(&client, &jar_id, amount, &myself) {
+                transfers.push_back(fee);
+            }
+        }
 
         // Each transfer `tip` will invoke on the token, authorized by *this*
         // contract: (from = ourselves, to = recipient, amount).
@@ -163,32 +166,28 @@ impl TipForwarder {
         client.tip(&myself, &jar_id, &amount, &message);
     }
 
-    /// Replay `tip`'s payment loop — skip self-transfers, roll the withheld
-    /// share into the last recipient — and report the transfers that actually
-    /// happen. These, not the raw preview, are the amounts to authorize when
-    /// the forwarder is itself a recipient.
-    fn actual_transfers(
-        env: &Env,
-        splits: &Vec<Split>,
-        shares: &Vec<i128>,
+    /// The protocol-fee transfer `tip` will make, if any (#79): `tip` takes
+    /// the fee off the top and pays it to the admin, so the previews' shares
+    /// sum to `amount - fee`. `None` when no fee is configured, or when this
+    /// contract is the admin and so keeps the fee rather than paying itself.
+    fn fee_transfer(
+        client: &SplitterClient,
+        jar_id: &String,
+        amount: i128,
         myself: &Address,
-    ) -> Vec<(Address, i128)> {
-        let n = shares.len();
-        let mut out: Vec<(Address, i128)> = Vec::new(env);
-        let mut skipped: i128 = 0;
-        for i in 0..n {
-            let to = splits.get(i).unwrap().to.clone();
-            let mut share = shares.get(i).unwrap();
-            if i == n - 1 {
-                share += skipped;
-            }
-            if share > 0 && to != *myself {
-                out.push_back((to, share));
-            } else {
-                skipped += share;
-            }
+    ) -> Option<(Address, i128)> {
+        let shares = client.preview_split(jar_id, &amount);
+        let mut net: i128 = 0;
+        for i in 0..shares.len() {
+            net += shares.get(i).unwrap();
         }
-        out
+        let fee = amount - net;
+        let admin = client.get_admin();
+        if fee > 0 && admin != *myself {
+            Some((admin, fee))
+        } else {
+            None
+        }
     }
 }
 
